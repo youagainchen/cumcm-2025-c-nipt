@@ -156,6 +156,36 @@ def to_record(row):
     return rec
 
 
+# ---------------------------------------------------------------- 恒定属性校准（v3.1）
+def reconcile_attr(recs, col):
+    """同一孕妇的恒定属性(height/age)跨行不一致 = 录入错误 → 众数校准。
+
+    原则：孕期身高不变化、年龄除生日最多 +1。把每名孕妇该列校准为该孕妇出现次数最多
+    的值（并列取最早一次出现），生成 {col}_cc（校准值）与 flag_attr_{col}（本行原值
+    是否被改）。原列保留、不覆盖 —— 可审计、可回退。
+    """
+    mothers = OrderedDict()
+    for r in recs:
+        mothers.setdefault(r["mother_id"], []).append(r)
+    for rows in mothers.values():
+        vis = {}                      # 值 -> 出现过的抽血(visit_idx)集合
+        for r in rows:
+            v = r[col]
+            if v is None:
+                continue
+            vis.setdefault(v, set()).add(r["visit_idx"])
+        if not vis:
+            rep = None
+        else:
+            # 以“抽血次数”计众数（避免技术重复行稀释）；并列取首次出现更早者
+            rep = max(vis, key=lambda v: (len(vis[v]), -min(vis[v])))
+        for r in rows:
+            raw = r[col]
+            r[col + "_cc"] = rep
+            r["flag_attr_" + col] = 1 if (rep is not None and raw is not None
+                                          and raw != rep) else 0
+
+
 # ---------------------------------------------------------------- 抽血事件 & 时序
 def draw_key_date(draw):
     """抽血的时序键：取组内最早 draw_date（缺失取极大值），并列时用 draw_idx。"""
@@ -252,8 +282,8 @@ def build_event_records(recs, is_male):
                 "n_reps": len(rep),
                 "is_tech_repeat": rep[0]["is_tech_repeat"],
                 "flag_chrono": max(r["flag_chrono"] for r in rep),
-                "age": next((r["age"] for r in rep if r["age"] is not None), None),
-                "height": next((r["height"] for r in rep if r["height"] is not None), None),
+                "age": rep[0]["age_cc"],
+                "height": rep[0]["height_cc"],
                 "weight": next((r["weight"] for r in rep if r["weight"] is not None), None),
                 "bmi": next((r["bmi"] for r in rep if r["bmi"] is not None), None),
                 "draw_date": min((r["draw_date"] for r in rep if r["draw_date"] is not None),
@@ -385,7 +415,8 @@ def make_report(male, female, ev_male, ev_female):
     line("- 数据含不可忽略的测量误差：以 (孕妇, 抽血) 区分**技术重复(一次采血多次测序)**，"
          "其组内离散度量化测量误差；随访/个体差异在更高层。推荐三层嵌套模型"
          "（孕妇/抽血/测序）—— 对应问题二、三对“检测误差影响”的要求。")
-    line("- 识别到的空缺/时序异常仅记录、不处置（见第九节）。")
+    line("- 处理边界：**缺失不插补、时序异常(flag_chrono)不修**；同一孕妇应恒定的身高/年龄若跨行"
+         "不一致（录入错误）以抽血众数校准为 `age_cc/height_cc`（见 §十，原值保留、可回退）。")
 
     # 一、基本画像（事件级为主）
     line("")
@@ -535,7 +566,7 @@ def make_report(male, female, ev_male, ev_female):
 
     # 九、识别到的空缺 / 时序异常
     line("")
-    line("## 九、识别到的空缺 / 时序/录入异常（仅记录，不处置）")
+    line("## 九、识别到的空缺 / 时序异常（空缺与时序异常仅记录；身高/年龄录入错误在 §十 校准）")
     line("- 空缺：见第二节（男胎 `lmp`12、`gravidity`300；女胎 `lmp`8、`bmi`1、`gravidity`165）。")
     for tag, recs in (("男胎", male), ("女胎", female)):
         ch = sorted({(r["mother_id"], r["draw_idx"]) for r in recs if r["flag_chrono"]})
@@ -554,7 +585,34 @@ def make_report(male, female, ev_male, ev_female):
         for col in ("height", "age"):
             n_inc = sum(1 for (c, _m), vs in per.items() if c == col and len(vs) > 1)
             if n_inc:
-                line(f"- {tag}：{n_inc} 位孕妇 `{col}` 跨行不一致（多为录入差异/周岁变化）。")
+                line(f"- {tag}：{n_inc} 位孕妇 `{col}` 跨行不一致 → 已按 §十 校准"
+                     f"为 `{col}_cc`（原值保留）。")
+
+    # 十、处理记录
+    line("")
+    line("## 十、空缺 / 输错的处理记录（识别到的问题数据按此处理，原值保留可回退）")
+    line("- **恒定属性校准**：身高孕期不变、年龄除生日至多 +1，故同一孕妇 height/age 跨行不一致"
+         "按录入错误处理，以该孕妇众数校准为 `age_cc / height_cc`（并列取更早一次）。")
+    line("- **不校准项**：体重/BMI 孕期真实变化不处理；仅备注极端值供敏感性参考"
+         "（男胎 A163 第 4 次抽血体重 140kg、较上次 +38kg，BMI45.7 列内自洽但增幅不合常理）。")
+    line("- **缺失不插补**（见 §二）：男胎 Q1-3 核心变量 week/y_conc/bmi 均无缺失；"
+         "用到 lmp/gravidity/女胎 bmi 的模型按需做完整样本或缺失指示处理。")
+    for tag, recs in (("男胎", male), ("女胎", female)):
+        for col in ("age", "height"):
+            rows_fix = [r for r in recs if r.get("flag_attr_" + col)]
+            if not rows_fix:
+                continue
+            seen = set()
+            ex = []
+            for r in rows_fix:
+                k = (r["mother_id"], r[col], r[col + "_cc"])
+                if k in seen:
+                    continue
+                seen.add(k)
+                ex.append(k)
+            line(f"- {tag} `{col}`：{len(rows_fix)} 行已校准 → " +
+                 "; ".join(f"{m}: {raw}→{cc}" for m, raw, cc in ex[:10]) +
+                 ("…" if len(ex) > 10 else ""))
 
     return "\n".join(L) + "\n"
 
@@ -575,6 +633,10 @@ def main():
     # 行级：抽血事件时序 + 技术重复 + 时序回退 flag
     add_draw_visit(male)
     add_draw_visit(female)
+    # 恒定属性校准（依赖 visit_idx）
+    for col in ("age", "height"):
+        reconcile_attr(male, col)
+        reconcile_attr(female, col)
     # 男胎行级达标事实
     for r in male:
         r["is_qualified"] = 1 if (r["y_conc"] is not None
@@ -595,11 +657,15 @@ def main():
                  "t_left", "t_right", "censored"]
     male_clean_cols = (base + ["week", "week_raw_s", "visit_idx", "n_visits",
                                "rep_in_draw", "n_reps_in_draw", "is_tech_repeat",
+                               "age_cc", "height_cc",
+                               "flag_attr_age", "flag_attr_height",
                                "is_qualified"] + surv_cols
                        + ["flag_chrono", "flag_gc", "flag_map_ratio",
                           "flag_dup_ratio", "flag_filt_ratio", "flag_any"])
     female_clean_cols = (base + ["week", "week_raw_s", "visit_idx", "n_visits",
                                  "rep_in_draw", "n_reps_in_draw", "is_tech_repeat",
+                                 "age_cc", "height_cc",
+                                 "flag_attr_age", "flag_attr_height",
                                  "label", "label_T13", "label_T18", "label_T21",
                                  "flag_chrono", "flag_gc", "flag_map_ratio",
                                  "flag_dup_ratio", "flag_filt_ratio", "flag_any"])
