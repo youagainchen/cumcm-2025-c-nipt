@@ -41,3 +41,10 @@ paper/            论文与格式参考
     —— 问题二首达/删失默认均值口径并附 `*_any` 对照，见 [docs/data_dictionary.md](docs/data_dictionary.md)。
 - 文档：列命名映射、字段含义、纪律与**对照评阅要点的处理立场**见 [`docs/data_dictionary.md`](docs/data_dictionary.md)；数字画像（含技术重复量化）见 [`docs/data_report.md`](docs/data_report.md)。
 
+## 阶段一问题一状态（甲）
+
+- 建模脚本：`python src/q1_model.py`（依赖 `data/processed/male_clean.csv`，先跑 `src/clean.py`）。
+- 产物（`outputs/`，不入库）：`q1_out.txt` 完整日志、`q1_coef.npy` 最终模型系数（问题二直接载入）。
+- 建模思路与图表需求：[`docs/建模思路/问题一_建模思路.md`](docs/建模思路/问题一_建模思路.md)。
+- 结论要点：Y 浓度对 sqrt 变换后建随机截距+孕周随机斜率的混合效应模型；孕周与 BMI 均显著（p<1e-16 / p=0.036）；ICC=0.84，个体差异主导浓度水平；孕周相关存在组内(+0.594)与组间(−0.265)反号现象。
+- **图由丙统一绘制**，规格见该文档第 8 节，输出到 `figures/`。
