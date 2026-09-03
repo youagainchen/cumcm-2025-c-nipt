@@ -32,3 +32,9 @@ paper/            论文与格式参考
 
 详细第一阶段安排见 [`docs/C题_第一阶段分工.md`](docs/C题_第一阶段分工.md)。
 
+## 阶段一数据就绪状态（丙）
+
+- 数据管道：`python src/clean.py` 从 `data/raw/附件.xlsx` 复现全部清洗产物。
+- 产物（`data/processed/`，被 .gitignore 忽略、不入库）：`male_min.csv`（T3 快速版 10 列）、`male_clean.csv`（47 列，含问题二删失区间标记）、`female_clean.csv`（44 列，AB 列标签）。
+- 文档：列命名映射、字段含义、关键数据事实与纪律见 [`docs/data_dictionary.md`](docs/data_dictionary.md)；数字画像见 [`docs/data_report.md`](docs/data_report.md)。
+
