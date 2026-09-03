@@ -35,6 +35,9 @@ paper/            论文与格式参考
 ## 阶段一数据就绪状态（丙）
 
 - 数据管道：`python src/clean.py` 从 `data/raw/附件.xlsx` 复现全部清洗产物。
-- 产物（`data/processed/`，被 .gitignore 忽略、不入库）：`male_min.csv`（T3 快速版 10 列）、`male_clean.csv`（47 列，含问题二删失区间标记）、`female_clean.csv`（44 列，AB 列标签）。
-- 文档：列命名映射、字段含义、关键数据事实与纪律见 [`docs/data_dictionary.md`](docs/data_dictionary.md)；数字画像见 [`docs/data_report.md`](docs/data_report.md)。
+- 产物（`data/processed/`，被 .gitignore 忽略、不入库）：
+  - 行级：`male_min.csv`、`male_clean.csv`（男胎）、`female_clean.csv`（女胎，AB 列标签）；
+  - **事件级**（每 (孕妇,抽血) 一行，问题一/二推荐口径）：`male_clean_event.csv`、`female_clean_event.csv`
+    —— 问题二首达/删失默认均值口径并附 `*_any` 对照，见 [docs/data_dictionary.md](docs/data_dictionary.md)。
+- 文档：列命名映射、字段含义、纪律与**对照评阅要点的处理立场**见 [`docs/data_dictionary.md`](docs/data_dictionary.md)；数字画像（含技术重复量化）见 [`docs/data_report.md`](docs/data_report.md)。
 
