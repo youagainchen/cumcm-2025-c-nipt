@@ -26,6 +26,8 @@ figures/*
 !figures/.gitkeep
 !figures/q1_v4/
 !figures/q1_v4/**
+!figures/q2_v1/
+!figures/q2_v1/**
 data/processed/*
 !data/processed/.gitkeep
 
