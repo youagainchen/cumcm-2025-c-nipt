@@ -1,0 +1,8 @@
+﻿model,metric_basis,group,interval,n,best_week,avg_risk,total_avg_risk
+q2_official_fixed,q3_multifactor_expected_risk,1,"[20.70, 31.5)",138,12.35000000000002,1.835305065004853,2.0355994161561557
+q2_official_fixed,q3_multifactor_expected_risk,2,"[31.50, 37)",114,14.200000000000044,2.1736578227513443,2.0355994161561557
+q2_official_fixed,q3_multifactor_expected_risk,3,"[37, 46.88]",15,17.900000000000098,2.8290635566247064,2.0355994161561557
+q3_multifactor_operational,q3_multifactor_expected_risk,1,"[20.70, 30)",76,13.142857142857142,1.7435428210702715,2.00557225069834
+q3_multifactor_operational,q3_multifactor_expected_risk,2,"[30.00, 33)",109,14.571428571428571,1.9452456913150622,2.00557225069834
+q3_multifactor_operational,q3_multifactor_expected_risk,3,"[33.00, 37)",67,15.857142857142858,2.22150803106837,2.00557225069834
+q3_multifactor_operational,q3_multifactor_expected_risk,4,"[37, 46.88]",15,19.285714285714285,2.8070478733462374,2.00557225069834

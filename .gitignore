@@ -22,6 +22,13 @@ tmp/
 *.log
 outputs/*
 !outputs/.gitkeep
+!outputs/q3_groups.csv
+!outputs/q3_instances.csv
+!outputs/q3_k_curve.csv
+!outputs/q3_sensitivity.csv
+!outputs/q3_vs_q2.csv
+!outputs/q3_exact_groups.csv
+!outputs/q3_boundary_stability.csv
 figures/*
 !figures/.gitkeep
 !figures/q1_v4/

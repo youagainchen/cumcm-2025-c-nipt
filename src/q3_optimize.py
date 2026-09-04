@@ -118,21 +118,50 @@ def load_probability_interface(module_name: str | None = None) -> tuple[Probabil
 
 
 def validate_probability_interface(prob_fn: ProbabilityFn, people: pd.DataFrame) -> None:
-    sample = people.iloc[[0, len(people) // 2, len(people) - 1]]
-    for row in sample.itertuples():
-        for week in (11.0, 16.0, 25.0):
+    """在全部个体和递归使用区间内验证累计概率与条件概率。"""
+    weeks = np.arange(T_MIN, RiskParams().horizon + 1e-9, 0.5)
+    for row in people.itertuples():
+        cumulative = []
+        for week in weeks:
             p = float(np.asarray(prob_fn(
                 week, row.bmi, row.height, row.weight, row.age,
                 thr=0.04, prev_week=None,
             )))
             if not np.isfinite(p) or not 0 <= p <= 1:
-                raise RuntimeError(f"概率接口返回非法值：p={p}, week={week}")
-        conditional = float(np.asarray(prob_fn(
-            16.0, row.bmi, row.height, row.weight, row.age,
-            thr=0.04, prev_week=12.0,
-        )))
-        if not np.isfinite(conditional) or not 0 <= conditional <= 1:
-            raise RuntimeError(f"条件概率接口返回非法值：{conditional}")
+                raise RuntimeError(
+                    f"概率接口返回非法值：mother={row.mother_id}, p={p}, week={week}"
+                )
+            cumulative.append(p)
+        cumulative = np.asarray(cumulative)
+        if np.any(np.diff(cumulative) < -1e-10):
+            raise RuntimeError(f"累计达标概率随孕周下降：mother={row.mother_id}")
+
+        for previous, current in ((12.0, 16.0), (16.0, 20.0), (20.0, 24.0)):
+            p_previous = float(np.asarray(prob_fn(
+                previous, row.bmi, row.height, row.weight, row.age,
+                thr=0.04, prev_week=None,
+            )))
+            p_current = float(np.asarray(prob_fn(
+                current, row.bmi, row.height, row.weight, row.age,
+                thr=0.04, prev_week=None,
+            )))
+            conditional = float(np.asarray(prob_fn(
+                current, row.bmi, row.height, row.weight, row.age,
+                thr=0.04, prev_week=previous,
+            )))
+            expected = np.clip(
+                (p_current - p_previous) / max(1.0 - p_previous, 1e-12), 0, 1
+            )
+            if (
+                not np.isfinite(conditional)
+                or not 0 <= conditional <= 1
+                or not np.isclose(conditional, expected, atol=1e-8, rtol=1e-6)
+            ):
+                raise RuntimeError(
+                    "条件概率与累计概率不一致："
+                    f"mother={row.mother_id}, prev={previous}, week={current}, "
+                    f"returned={conditional}, expected={expected}"
+                )
 
 
 def expected_risk(
@@ -179,9 +208,43 @@ def build_risk_matrix(
 ) -> tuple[np.ndarray, np.ndarray]:
     params = params or RiskParams()
     times = np.arange(T_MIN, T_MAX + 1e-9, grid_step)
-    values = np.empty((len(people), len(times)))
-    for i, row in enumerate(people.itertuples()):
-        values[i] = [expected_risk(t, row, prob_fn, params) for t in times]
+    shape = (len(people), len(times))
+    base_week = np.broadcast_to(times[None, :], shape)
+    bmi = people.bmi.to_numpy(float)[:, None]
+    height = people.height.to_numpy(float)[:, None]
+    weight = people.weight.to_numpy(float)[:, None]
+    age = people.age.to_numpy(float)[:, None]
+    reach = np.ones(shape)
+    values = np.zeros(shape)
+    try:
+        for attempt in range(params.max_retest + 1):
+            week = base_week + attempt * params.retest_gap
+            active = week <= params.horizon
+            previous = None if attempt == 0 else week - params.retest_gap
+            probability = np.asarray(prob_fn(
+                week, bmi, height, weight, age,
+                thr=0.04, prev_week=previous,
+            ), float)
+            probability = np.broadcast_to(probability, shape)
+            if np.any(active & (
+                ~np.isfinite(probability) | (probability < 0) | (probability > 1)
+            )):
+                raise RuntimeError("向量化概率接口返回非法值。")
+            success = np.where(active, reach * probability, 0.0)
+            values += success * risk_curve(week, params)
+            failed = np.where(active, reach * (1.0 - probability), 0.0)
+            values += failed * params.q_dropout * params.r_dropout
+            reach = np.where(active, failed * (1.0 - params.q_dropout), reach)
+        end_week = np.minimum(
+            base_week + params.max_retest * params.retest_gap,
+            params.horizon,
+        )
+        values += reach * risk_curve(end_week, params)
+    except (TypeError, ValueError, IndexError):
+        # 兼容只接受标量的外部概率接口；正式接口的非法概率仍由下方检查拒绝。
+        values = np.empty(shape)
+        for i, row in enumerate(people.itertuples()):
+            values[i] = [expected_risk(t, row, prob_fn, params) for t in times]
     if not np.all(np.isfinite(values)):
         raise RuntimeError("问题三风险矩阵含非有限值。")
     return times, values
@@ -274,9 +337,17 @@ def optimize_integer_boundaries(
     total, cuts, positions, time_indices = best
     edges = [float(bmi.min()), *(float(x) for x in cuts), float(bmi.max())]
     rows = []
+    rounded_total = 0.0
     for group, (left, right, lo, hi, ti) in enumerate(
         zip(positions[:-1], positions[1:], edges[:-1], edges[1:], time_indices), 1
     ):
+        best_week = float(times[ti])
+        rounded_days = int(np.rint(best_week * 7))
+        rounded_week = rounded_days / 7.0
+        rounded_cost = float(np.interp(
+            rounded_week, times, prefix[right] - prefix[left]
+        ))
+        rounded_total += rounded_cost
         rows.append({
             "group": group,
             "lower": lo,
@@ -289,13 +360,18 @@ def optimize_integer_boundaries(
             "n": right - left,
             "bmi_min": float(bmi[left]),
             "bmi_max": float(bmi[right - 1]),
-            "best_week": float(times[ti]),
+            "best_week": best_week,
+            "recommended_week": rounded_week,
+            "recommended_time": f"{rounded_days // 7}周+{rounded_days % 7}天",
             "avg_risk": float((prefix[right] - prefix[left])[ti] / (right - left)),
+            "rounded_avg_risk": rounded_cost / (right - left),
         })
     groups = pd.DataFrame(rows)
     total_avg = total / len(bmi)
     groups["total_avg_risk"] = total_avg
     groups["regret_vs_exact"] = total_avg - exact_avg_risk
+    groups["rounded_total_avg_risk"] = rounded_total / len(bmi)
+    groups["time_rounding_regret"] = rounded_total / len(bmi) - total_avg
     return groups, tuple(cuts), total_avg
 
 
@@ -309,16 +385,30 @@ def assign_instances(
     cuts = groups.upper.iloc[:-1].to_numpy(float)
     assigned["group"] = np.searchsorted(cuts, assigned.bmi.to_numpy(float), side="right") + 1
     week_map = groups.set_index("group").best_week
+    recommended_week_map = groups.set_index("group").recommended_week
+    recommended_time_map = groups.set_index("group").recommended_time
     assigned["best_week"] = assigned.group.map(week_map)
+    assigned["recommended_week"] = assigned.group.map(recommended_week_map)
+    assigned["recommended_time"] = assigned.group.map(recommended_time_map)
     probabilities, risks = [], []
+    recommended_probabilities, recommended_risks = [], []
     for row in assigned.itertuples():
         probabilities.append(float(np.asarray(prob_fn(
             row.best_week, row.bmi, row.height, row.weight, row.age,
             thr=0.04, prev_week=None,
         ))))
         risks.append(expected_risk(row.best_week, row, prob_fn, params))
+        recommended_probabilities.append(float(np.asarray(prob_fn(
+            row.recommended_week, row.bmi, row.height, row.weight, row.age,
+            thr=0.04, prev_week=None,
+        ))))
+        recommended_risks.append(
+            expected_risk(row.recommended_week, row, prob_fn, params)
+        )
     assigned["qualified_probability"] = probabilities
     assigned["expected_risk"] = risks
+    assigned["recommended_qualified_probability"] = recommended_probabilities
+    assigned["recommended_expected_risk"] = recommended_risks
     return assigned
 
 
@@ -331,14 +421,20 @@ def compare_with_q2(
     """在同一套问题三个体风险下公平比较问题二与问题三方案。"""
     q2_path = OUT / "q2_final_groups.csv"
     q3 = q3_groups[[
-        "group", "interval", "n", "best_week", "avg_risk", "total_avg_risk"
-    ]].copy()
-    q3.insert(0, "model", "q3_multifactor")
+        "group", "interval", "n", "recommended_week", "rounded_avg_risk",
+        "rounded_total_avg_risk",
+    ]].rename(columns={
+        "recommended_week": "best_week",
+        "rounded_avg_risk": "avg_risk",
+        "rounded_total_avg_risk": "total_avg_risk",
+    }).copy()
+    q3.insert(0, "model", "q3_multifactor_operational")
     q3.insert(1, "metric_basis", "q3_multifactor_expected_risk")
     if not q2_path.exists():
         return q3
     q2_plan = pd.read_csv(q2_path, encoding="utf-8-sig").sort_values("group")
     bmi = people.bmi.to_numpy(float)
+    coverage = np.zeros(len(people), dtype=int)
     rows = []
     total = 0.0
     for row in q2_plan.itertuples():
@@ -346,6 +442,9 @@ def compare_with_q2(
             mask = (bmi >= row.lower) & (bmi < row.upper)
         else:
             mask = (bmi >= row.lower) & (bmi <= row.upper)
+        if not mask.any():
+            raise RuntimeError(f"问题二第{row.group}组在问题三样本中为空。")
+        coverage += mask.astype(int)
         idx = int(np.argmin(np.abs(times - float(row.best_week))))
         group_total = float(risks[mask, idx].sum())
         total += group_total
@@ -358,6 +457,8 @@ def compare_with_q2(
             "best_week": float(row.best_week),
             "avg_risk": group_total / int(mask.sum()),
         })
+    if not np.all(coverage == 1):
+        raise RuntimeError("问题二方案未在问题三样本上实现完整且唯一覆盖。")
     q2 = pd.DataFrame(rows)
     q2["total_avg_risk"] = total / len(people)
     return pd.concat([q2, q3], ignore_index=True)
@@ -377,8 +478,29 @@ def validate_outputs(
         raise RuntimeError("风险随组数增加而上升。")
     if not instances.qualified_probability.between(0, 1).all():
         raise RuntimeError("个体达标概率不在[0,1]内。")
-    if not np.all(groups.upper.iloc[:-1].to_numpy() <= groups.lower.iloc[1:].to_numpy()):
+    if not instances.recommended_qualified_probability.between(0, 1).all():
+        raise RuntimeError("整天推荐时点的个体达标概率不在[0,1]内。")
+    if not np.allclose(
+        groups.upper.iloc[:-1].to_numpy(float),
+        groups.lower.iloc[1:].to_numpy(float),
+        atol=1e-10,
+        rtol=0,
+    ):
         raise RuntimeError("BMI分组不连续。")
+    expected_counts = groups.set_index("group").n.astype(int).sort_index()
+    actual_counts = instances.groupby("group").size().astype(int).sort_index()
+    if not expected_counts.equals(actual_counts):
+        raise RuntimeError("个体分配人数与分组汇总表不一致。")
+    if instances.groupby("bmi").group.nunique().max() != 1:
+        raise RuntimeError("相同BMI被拆分到不同组。")
+    if np.any(np.diff(groups.best_week.to_numpy(float)) < -1e-10):
+        raise RuntimeError("BMI升高时推荐孕周出现逆序。")
+    operational_means = (
+        instances.groupby("group").recommended_expected_risk.mean()
+        .reindex(groups.group).to_numpy(float)
+    )
+    if not np.allclose(operational_means, groups.rounded_avg_risk, atol=1e-8):
+        raise RuntimeError("整天推荐时点的个体风险与分组汇总不一致。")
 
 
 def run(
