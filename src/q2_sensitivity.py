@@ -20,8 +20,17 @@ COEF = OUT / "q1_coef.npy"
 SURV = OUT / "q2_survival.npy"
 
 
-def k4_result(label: str, instant: ExpectedRisk, censored: ExpectedRisk,
-              grid_step: float = 0.10) -> list[dict]:
+def final_k() -> int:
+    """采用 q2_final.py 判据选定的组数；未跑过则回退到当前定案值 3。"""
+    plan = OUT / "q2_final_groups.csv"
+    if plan.exists():
+        return int(len(pd.read_csv(plan, encoding="utf-8-sig")))
+    return 3
+
+
+def final_k_result(label: str, instant: ExpectedRisk, censored: ExpectedRisk,
+                   grid_step: float = 0.10) -> list[dict]:
+    k = final_k()
     bmi = load_baseline_bmi().bmi.to_numpy(float)
     times, values_instant = risk_matrix(instant, bmi, grid_step)
     times_censored, values_censored = risk_matrix(censored, bmi, grid_step)
@@ -29,11 +38,11 @@ def k4_result(label: str, instant: ExpectedRisk, censored: ExpectedRisk,
         raise RuntimeError("两个风险输入组件的候选检测时点网格不一致。")
     values = 0.5 * (values_instant + values_censored)
     summary, groups = optimize_all_k(
-        bmi, times, values, max_k=4, min_group_size=15
+        bmi, times, values, max_k=k, min_group_size=15
     )
-    s = summary.loc[summary.k == 4].iloc[0]
+    s = summary.loc[summary.k == k].iloc[0]
     out = []
-    for row in groups[groups.k == 4].itertuples():
+    for row in groups[groups.k == k].itertuples():
         out.append(dict(
             scenario=label, group=row.group, lower=row.lower, upper=row.upper,
             n=row.n, best_week=row.best_week, group_risk=row.avg_risk,
@@ -58,7 +67,7 @@ def risk_and_measurement_sensitivity() -> pd.DataFrame:
     rows = []
     for label, params in parameter_scenarios:
         print(f"敏感性场景：{label}")
-        rows.extend(k4_result(
+        rows.extend(final_k_result(
             label,
             ExpectedRisk(params=params),
             ExpectedRisk(prob_fn=aft_prob, params=params),
@@ -74,7 +83,7 @@ def risk_and_measurement_sensitivity() -> pd.DataFrame:
         ("测序内方差加倍", elevated),
     ]:
         print(f"敏感性场景：{label}")
-        rows.extend(k4_result(
+        rows.extend(final_k_result(
             label,
             ExpectedRisk(coef=coef_variant, params=base),
             ExpectedRisk(prob_fn=aft_prob, params=base),
@@ -107,10 +116,10 @@ def aft_parameter_uncertainty(draws: int = 1000, seed: int = 2025) -> tuple[pd.D
     mothers = load_baseline_bmi()
     plan_path = OUT / "q2_final_groups.csv"
     if not plan_path.exists():
-        raise RuntimeError("未找到最终4组方案，请先运行 q2_final.py。")
+        raise RuntimeError("未找到最终分组方案，请先运行 q2_final.py。")
     plan = pd.read_csv(plan_path, encoding="utf-8-sig")
-    if len(plan) != 4:
-        raise RuntimeError("q2_final_groups.csv 不是4组方案。")
+    if len(plan) < 2:
+        raise RuntimeError("q2_final_groups.csv 的分组数异常。")
 
     b_ref = [30.0, 35.0, 40.0]
     draw_rows, risk_rows = [], []

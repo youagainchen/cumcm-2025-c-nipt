@@ -105,7 +105,8 @@ def plot_optimization() -> None:
     fig, axes = plt.subplots(1, 3, figsize=(16, 5.2))
     axes[0].plot(summary.k, summary.relative_reduction * 100, marker="o",
                  lw=2.5, color="#1f4e79")
-    axes[0].axvline(4, color="#b2182b", ls="--", label="采用 k=4")
+    k_final = len(final_groups)
+    axes[0].axvline(k_final, color="#b2182b", ls="--", label=f"采用 k={k_final}")
     axes[0].set(xlabel="组数 k", ylabel="相对不分组风险降幅（%）",
                 title="A. 最终模型的组数收益")
     axes[0].legend(frameon=False)
@@ -116,7 +117,7 @@ def plot_optimization() -> None:
         axes[1].text(bar.get_x() + bar.get_width() / 2, row.best_week + 0.15,
                      f"{row.best_week:.2f}周\nn={row.n}", ha="center", fontsize=8)
     axes[1].set(xlabel="BMI组", ylabel="推荐检测孕周",
-                title="B. 四组最佳检测时点", ylim=(0, 20))
+                title="B. 各组最佳检测时点", ylim=(0, 20))
 
     bins = np.linspace(bmi.min(), bmi.max(), 22)
     colors = ["#4c78a8", "#72a0c1", "#e69f00", "#b2182b"]
@@ -127,7 +128,7 @@ def plot_optimization() -> None:
             subset = bmi[(bmi >= row.lower) & (bmi <= row.upper)]
         axes[2].hist(subset, bins=bins, color=color, alpha=0.8,
                      label=f"组{row.group} n={row.n}")
-    for cut in (30, 32, 37):
+    for cut in final_groups.upper.to_numpy()[:-1]:
         axes[2].axvline(cut, color="#333333", ls="--", lw=1)
     axes[2].set(xlabel="基线BMI", ylabel="孕妇数", title="C. 最终可执行分组")
     axes[2].legend(frameon=False)
@@ -135,7 +136,10 @@ def plot_optimization() -> None:
     fig.suptitle("最终BMI分组：组数、边界与检测时点",
                  fontsize=15, fontweight="bold")
     fig.text(0.5, 0.01,
-             "最终采用4组，整数BMI边界为30、32和37；各组时点由集成期望风险最小化得到。",
+             f"最终采用{len(final_groups)}组，整数BMI边界为"
+             f"{'、'.join(f'{c:g}' for c in final_groups.upper.to_numpy()[:-1])}；"
+             "组数由收益捕获率、组间时点可辨性与组样本量三条判据选定，"
+             "各组时点由集成期望风险最小化得到。",
              ha="center", fontsize=9)
     fig.tight_layout(rect=(0, 0.04, 1, 0.95))
     save(fig, "q2_02_group_optimization")
@@ -144,14 +148,18 @@ def plot_optimization() -> None:
 def plot_uncertainty() -> None:
     sensitivity = pd.read_csv(OUT / "q2_sensitivity.csv", encoding="utf-8-sig")
     uncertainty = pd.read_csv(OUT / "q2_uncertainty_summary.csv", encoding="utf-8-sig")
-    high = sensitivity[sensitivity.group == 4].copy()
+    k_final = int(sensitivity.group.max())
+    high = sensitivity[sensitivity.group == k_final].copy()
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
     y = np.arange(len(high))[::-1]
     axes[0].scatter(high.best_week, y, color="#4c78a8", s=50)
-    axes[0].axvline(17.9, color="#b2182b", ls="--", label="正式设定17.9周")
+    ref_week = float(high.loc[high.scenario == "正式设定", "best_week"].iloc[0])
+    axes[0].axvline(ref_week, color="#b2182b", ls="--",
+                    label=f"正式设定{ref_week:.1f}周")
     axes[0].set_yticks(y, high.scenario)
-    axes[0].set(xlabel="第4组最佳孕周", title="A. 风险参数与检测误差敏感性")
+    axes[0].set(xlabel=f"最高BMI组(第{k_final}组)最佳孕周",
+                title="A. 风险参数与检测误差敏感性")
     axes[0].legend(frameon=False, fontsize=8)
 
     selected = uncertainty[uncertainty.quantity.isin(["t80", "t90"])].copy()
