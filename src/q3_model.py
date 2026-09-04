@@ -33,6 +33,20 @@ Q1_S2_TECH = 0.000174
 WEEK_MIN, WEEK_MAX = 11.0, 25.0
 FEATURES = ("bmi", "height", "weight", "age")
 
+# 正式接口使用的协变量规格。
+#
+# 不能用 all_factors（bmi+height+weight+age）：BMI = 体重/身高^2 是恒等式，
+# 三者代数冗余。实测该数据 BMI 与 weight/height^2 的相关为 1.000000（最大偏差
+# 0.002，纯舍入），VIF 为 BMI 238 / 身高 107 / 体重 377，BMI 对 (身高,体重)
+# 回归的 R^2 = 0.9958，仅剩 0.42% 独立信息。同时放三者会让系数不可辨识：
+# 实测 BMI 系数由单独建模时的 +0.1169 翻号为 -0.7950，与问题一、二"BMI 越高
+# 达标越晚"的稳健结论矛盾；且由此产生的个体风险不再随 BMI 单调，k=6 时出现
+# 推荐时点倒挂（高 BMI 组反而更早检测）。
+#
+# 故正式接口改用 height+weight+age：既回应题目"综合考虑身高、体重、年龄"，
+# 又避开与 BMI 的恒等冗余；分组变量仍为基线 BMI，不受影响。
+FORMAL_SPEC = "height_weight_age"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="问题三多因素达标时间模型")
@@ -254,7 +268,7 @@ def fit_aft_candidates(subject: pd.DataFrame) -> tuple[str, str, object, pd.Data
                        np.exp(-0.5 * table["delta_aic"]), 0.0)
     table["akaike_weight"] = weights / weights.sum()
     cv_table, calibration_table = grouped_aft_cv(subject, specs)
-    multifactor = valid[valid["feature_model"] == "all_factors"]
+    multifactor = valid[valid["feature_model"] == FORMAL_SPEC]
     cv_scores = (cv_table[cv_table["valid"]]
                  .groupby("distribution", as_index=False)["mean_log_likelihood"].mean()
                  .sort_values("mean_log_likelihood", ascending=False))
@@ -440,7 +454,7 @@ def grouped_aft_cv(subject: pd.DataFrame, specs: dict[str, list[str]], folds: in
     rows = []
     calibration_rows = []
     lower, upper = bounds_for_aft(subject)
-    features = specs["all_factors"]
+    features = specs[FORMAL_SPEC]
     distributions = {
         "Weibull": WeibullAFTFitter,
         "LogNormal": LogNormalAFTFitter,
@@ -517,14 +531,14 @@ def grouped_aft_cv(subject: pd.DataFrame, specs: dict[str, list[str]], folds: in
                             "mean_observed": bin_group["observed"].mean(),
                         })
                 rows.append({"fold": fold, "distribution": distribution,
-                             "feature_model": "all_factors", "n_validation": len(validation),
+                             "feature_model": FORMAL_SPEC, "n_validation": len(validation),
                              "interval_log_likelihood": log_likelihood,
                              "mean_log_likelihood": log_likelihood / max(len(validation), 1),
                              "first_detection_auc": auc, "first_detection_brier": brier,
                              "valid": True})
             except Exception as exc:
                 rows.append({"fold": fold, "distribution": distribution,
-                             "feature_model": "all_factors", "n_validation": len(validation),
+                             "feature_model": FORMAL_SPEC, "n_validation": len(validation),
                              "interval_log_likelihood": np.nan, "mean_log_likelihood": np.nan,
                              "first_detection_auc": np.nan, "first_detection_brier": np.nan,
                              "valid": False, "error": str(exc)})
@@ -545,6 +559,40 @@ def estimate_technical_time_sd(events: pd.DataFrame) -> float:
     return float(np.sqrt(Q1_S2_TECH) / slope)
 
 
+def collinearity(subject: pd.DataFrame) -> pd.DataFrame:
+    """量化 BMI 与身高体重的代数冗余，作为 FORMAL_SPEC 选择的依据存档。
+
+    BMI = 体重/身高^2 是恒等式，不是统计相关。若把三者同时放入模型，系数不
+    可辨识；本表给出 VIF、BMI 对 (身高,体重) 的可解释比例，以及 BMI 与
+    体重/身高^2 的相关，供论文直接引用。
+    """
+    raw = subject[list(FEATURES)].astype(float)
+    z = (raw - raw.mean()) / raw.std(ddof=0)
+    design = np.column_stack([np.ones(len(z)), z.to_numpy()])
+    rows = []
+    for i, column in enumerate(FEATURES):
+        others = [j for j in range(len(FEATURES)) if j != i]
+        x = np.column_stack([np.ones(len(z)), z.to_numpy()[:, others]])
+        y = z.to_numpy()[:, i]
+        beta, *_ = np.linalg.lstsq(x, y, rcond=None)
+        r2 = 1.0 - np.sum((y - x @ beta) ** 2) / np.sum((y - y.mean()) ** 2)
+        rows.append({"feature": column, "r2_on_others": r2,
+                     "vif": 1.0 / max(1.0 - r2, 1e-12)})
+    table = pd.DataFrame(rows)
+    implied = raw["weight"] / (raw["height"] / 100.0) ** 2
+    table.attrs["identity_corr"] = float(np.corrcoef(raw["bmi"], implied)[0, 1])
+    x = np.column_stack([np.ones(len(z)), z[["height", "weight"]].to_numpy()])
+    beta, *_ = np.linalg.lstsq(x, z["bmi"].to_numpy(), rcond=None)
+    resid = z["bmi"].to_numpy() - x @ beta
+    table["note"] = ""
+    table.loc[table.feature == "bmi", "note"] = (
+        f"BMI 与 体重/身高^2 相关={table.attrs['identity_corr']:.6f}；"
+        f"BMI 对(身高,体重)回归后仅剩 "
+        f"{np.var(resid) / np.var(z['bmi'].to_numpy()) * 100:.2f}% 独立方差"
+    )
+    return table
+
+
 def write_summary(args, events, subject, mixed_name, mixed_table, aft_name, aft_dist, aft_table,
                   payload, mixed_fit, stats, cv_table, calibration_table):
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -560,6 +608,8 @@ def write_summary(args, events, subject, mixed_name, mixed_table, aft_name, aft_
     uncertainty.to_csv(args.output_dir / "q3_uncertainty_summary.csv", index=False, encoding="utf-8-sig")
     cv_table.to_csv(args.output_dir / "q3_aft_grouped_cv.csv", index=False, encoding="utf-8-sig")
     calibration_table.to_csv(args.output_dir / "q3_aft_calibration.csv", index=False, encoding="utf-8-sig")
+    collinearity(subject).to_csv(args.output_dir / "q3_collinearity.csv",
+                                 index=False, encoding="utf-8-sig")
     measurement_rows = []
     aft_prob_fn = prob_fn_from_payload(payload)
     technical_time_sd = estimate_technical_time_sd(events)
@@ -595,8 +645,10 @@ def write_summary(args, events, subject, mixed_name, mixed_table, aft_name, aft_
         "aft_distribution": aft_dist, "feature_stats": stats,
         "parameter_mc_draws": args.bootstrap, "technical_variance": Q1_S2_TECH,
         "technical_time_sd": technical_time_sd,
-        "aft_selection": "all_factors distribution selected by grouped 5-fold mean interval log-likelihood",
-        "aft_cv": "grouped 5-fold; all_factors + all candidate distributions",
+        "aft_selection": f"{FORMAL_SPEC} distribution selected by grouped 5-fold mean interval log-likelihood",
+        "aft_cv": f"grouped 5-fold; {FORMAL_SPEC} + all candidate distributions",
+        "formal_spec_reason": "BMI=weight/height^2 恒等，与身高体重代数冗余(VIF 238/107/377)，"
+                              "同时入模会致系数反号与风险对BMI非单调，故正式接口用 height+weight+age",
     }
     (args.output_dir / "q3_model_summary.txt").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2) + "\n\nAFT候选比较：\n" +
