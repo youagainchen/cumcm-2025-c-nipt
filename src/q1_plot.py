@@ -193,9 +193,11 @@ def check_official(final, d: pd.DataFrame) -> None:
         )
 
 
-def plot_trajectory_coverage(d: pd.DataFrame) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), gridspec_kw={"width_ratios": [1.65, 1]})
-    ax = axes[0]
+def plot_data_correlation(d: pd.DataFrame) -> None:
+    """把数据覆盖、描述性相关和聚类区间合并成一张四联图。"""
+    fig, axes = plt.subplots(2, 2, figsize=(13.5, 10.2),
+                             gridspec_kw={"width_ratios": [1.55, 1]})
+    ax = axes[0, 0]
     for _, g in d.groupby("mother_id"):
         ax.plot(g.week, g.y_conc * 100, color="#7f8c8d", alpha=0.11, lw=0.6)
     ax.scatter(d.week, d.y_conc * 100, s=9, color="#4c78a8", alpha=0.12, edgecolors="none")
@@ -212,7 +214,7 @@ def plot_trajectory_coverage(d: pd.DataFrame) -> None:
            title="A. 孕妇纵向检测轨迹")
     ax.legend(frameon=False, loc="upper left")
 
-    ax = axes[1]
+    ax = axes[0, 1]
     edges = np.arange(11, 30.01, 2)
     labels = [f"{int(a)}–{int(b)}" for a, b in zip(edges[:-1], edges[1:])]
     cats = pd.cut(d.week, bins=edges, right=False, include_lowest=True, labels=labels)
@@ -230,8 +232,39 @@ def plot_trajectory_coverage(d: pd.DataFrame) -> None:
     ax.set_xticks(x, coverage.index, rotation=45, ha="right")
     ax.set(xlabel="孕周区间（周）", ylabel="数量", title="B. 各孕周区间数据覆盖")
     ax.legend(frameon=False)
-    fig.suptitle("问题一：原始纵向轨迹与孕周覆盖", fontsize=15, fontweight="bold")
-    save_figure(fig, "q1_01_trajectory_coverage")
+    cols = ["week", "bmi", "age", "height", "weight", "y_conc"]
+    names = ["孕周", "BMI", "年龄", "身高", "体重", "Y浓度"]
+    corr = d[cols].corr(method="spearman")
+    ax = axes[1, 0]
+    sns.heatmap(corr, annot=True, fmt=".2f", cmap="vlag", center=0, vmin=-1, vmax=1,
+                xticklabels=names, yticklabels=names, square=True,
+                cbar_kws={"shrink": 0.75}, ax=ax)
+    ax.set_title("C. 事件级Spearman相关（描述性）")
+
+    boot_week = cluster_boot_corr(d, "week")
+    boot_bmi = cluster_boot_corr(d, "bmi")
+    vals = [np.mean(boot_week), np.mean(boot_bmi), 0.5920, -0.2618]
+    cis = [np.percentile(boot_week, [2.5, 97.5]),
+           np.percentile(boot_bmi, [2.5, 97.5]), None, None]
+    labels_corr = ["总体孕周–Y", "总体BMI–Y", "孕妇内孕周–Y", "孕妇间孕周–Y"]
+    colors = ["#4c78a8", "#d55e00", "#009e73", "#b2182b"]
+    ycorr = np.arange(4)[::-1]
+    ax = axes[1, 1]
+    ax.axvline(0, color="#444444", ls="--", lw=1)
+    for i, (val, ci, color) in enumerate(zip(vals, cis, colors)):
+        if ci is None:
+            ax.scatter(val, ycorr[i], color=color, s=55, zorder=3)
+            ax.text(val + 0.025, ycorr[i], f"r={val:+.3f}", va="center", fontsize=8)
+        else:
+            ax.errorbar(val, ycorr[i], xerr=[[val-ci[0]], [ci[1]-val]], fmt="o",
+                        color=color, capsize=4, lw=2)
+            ax.text(ci[1] + 0.025, ycorr[i], f"95%CI [{ci[0]:+.3f},{ci[1]:+.3f}]",
+                    va="center", fontsize=8)
+    ax.set_yticks(ycorr, labels_corr)
+    ax.set(xlim=(-0.36, 0.72), xlabel="相关系数",
+           title="D. 聚类Bootstrap及组内/组间相关")
+    fig.suptitle("问题一：数据覆盖与相关特性", fontsize=15, fontweight="bold")
+    save_figure(fig, "q1_01_data_correlation")
 
 
 def prediction_grid(final, d: pd.DataFrame):
@@ -285,60 +318,72 @@ def plot_nonlinear_comparison(d: pd.DataFrame, final) -> None:
     ax.set(xlim=(11, 29), xlabel="孕周（周）", ylabel="Y染色体浓度（%）",
            title="孕周非线性：线性、二次、LOWESS与最终样条比较")
     ax.legend(frameon=False, ncol=2)
-    save_figure(fig, "q1_02_nonlinear_comparison")
+    save_figure(fig, "q1_02_nonlinear_relationship")
 
 
-def plot_bmi_forest() -> None:
-    labels = ["基线BMI（between）", "孕期内BMI变化（within）"]
+def plot_model_evidence() -> None:
+    """把模型选择、BMI推断和稳健性证据放进一张三联图。"""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6.2),
+                             gridspec_kw={"width_ratios": [1.25, 1, 1]})
+
+    ax = axes[0]
+    keep = ["线性孕周", "二次+基线BMI", "样条df3+基线BMI", "最终模型",
+            "最终+年龄", "身高体重替代", "样条df6"]
+    tab = MODEL_COMPARISON.set_index("model").loc[keep].reset_index()
+    tab["delta_AIC"] = tab.AIC - MODEL_COMPARISON.AIC.min()
+    tab["delta_BIC"] = tab.BIC - MODEL_COMPARISON.BIC.min()
+    y = np.arange(len(tab))[::-1]
+    ax.scatter(tab.delta_AIC, y + 0.10, color="#4c78a8", s=45, label="ΔAIC")
+    ax.scatter(tab.delta_BIC, y - 0.10, color="#e69f00", marker="s", s=42, label="ΔBIC")
+    for yy, row in zip(y, tab.itertuples()):
+        if row.model == "最终模型":
+            ax.axhspan(yy - 0.32, yy + 0.32, color="#1f4e79", alpha=0.08)
+    ax.set_yticks(y, tab.model)
+    ax.set(xlabel="相对最优模型的信息准则差值（越低越好）", title="A. 候选模型比较")
+    ax.legend(frameon=False)
+
+    ax = axes[1]
+    labels = ["基线BMI\n（between）", "孕期内BMI变化\n（within）"]
     est = np.array([OFFICIAL["between"], OFFICIAL["within"]])
     wald = np.array([OFFICIAL["between_wald"], OFFICIAL["within_wald"]])
     boot = np.array([OFFICIAL["between_boot"], OFFICIAL["within_boot"]])
     y = np.arange(2)[::-1]
-
-    fig, ax = plt.subplots(figsize=(9.2, 4.5))
     ax.axvline(0, color="#444444", lw=1, ls="--")
     for i in range(2):
-        ax.errorbar(est[i], y[i] + 0.09,
+        ax.errorbar(est[i], y[i] + 0.08,
                     xerr=[[est[i] - wald[i, 0]], [wald[i, 1] - est[i]]],
                     fmt="o", color="#4c78a8", capsize=4, lw=2,
                     label="Wald 95%CI" if i == 0 else None)
-        ax.errorbar(est[i], y[i] - 0.09,
+        ax.errorbar(est[i], y[i] - 0.08,
                     xerr=[[est[i] - boot[i, 0]], [boot[i, 1] - est[i]]],
                     fmt="s", color="#d55e00", capsize=4, lw=2,
                     label="孕妇级Bootstrap 95%CI" if i == 0 else None)
     ax.set_yticks(y, labels)
-    ax.set(xlabel="回归系数（sqrt(Y)尺度）", title="BMI组间效应与组内效应")
-    ax.text(0.98, 0.94, "BMI拆分 ML-LRT p=6.33e-4", transform=ax.transAxes,
-            ha="right", va="top")
-    ax.text(OFFICIAL["between"], y[0] + 0.20, "p=0.00004", ha="center", fontsize=9)
-    ax.text(OFFICIAL["within"], y[1] + 0.20, "p=0.13163", ha="center", fontsize=9)
-    ax.set_ylim(-0.35, 1.38)
-    ax.legend(frameon=False, loc="center right", bbox_to_anchor=(0.98, 0.43))
-    save_figure(fig, "q1_03_bmi_effect_forest")
+    ax.set(xlabel="回归系数（sqrt(Y)尺度）", title="B. BMI效应及区间",
+           ylim=(-0.45, 1.45))
+    ax.text(0.98, 0.97, "BMI拆分 ML-LRT\np=6.33e-4", transform=ax.transAxes,
+            ha="right", va="top", fontsize=9)
+    ax.legend(frameon=False, loc="lower right", fontsize=8)
 
+    ax = axes[2]
+    robust = ROBUSTNESS.iloc[::-1].reset_index(drop=True)
+    ax.axvspan(OFFICIAL["between_boot"][0], OFFICIAL["between_boot"][1],
+               color="#4c78a8", alpha=0.14, label="主模型Bootstrap 95%CI")
+    ax.axvline(0, color="#444444", ls="--", lw=1)
+    ax.scatter(robust.coef, np.arange(len(robust)), s=55, color="#1f4e79", zorder=3)
+    ax.set_yticks(np.arange(len(robust)), robust.setting)
+    ax.set(xlabel="基线BMI系数（sqrt(Y)尺度）", title="C. 数据口径稳健性")
+    ax.legend(frameon=False, fontsize=8)
 
-def plot_model_comparison() -> None:
-    tab = MODEL_COMPARISON.sort_values("AIC", ascending=False).reset_index(drop=True)
-    y = np.arange(len(tab))
-    fig, axes = plt.subplots(1, 2, figsize=(13, 6), sharey=True)
-    for ax, metric, color in zip(axes, ["AIC", "BIC"], ["#4c78a8", "#e69f00"]):
-        colors = ["#1f4e79" if m == "最终模型" else color for m in tab.model]
-        ax.scatter(tab[metric], y, c=colors, s=55, zorder=3)
-        for yy, val in zip(y, tab[metric]):
-            ax.text(val + 0.8, yy, f"{val:.2f}", va="center", fontsize=8)
-        ax.set_xlabel(metric + "（越低越好）")
-        ax.set_title(metric + "比较")
-        ax.grid(axis="x", alpha=0.25)
-    axes[0].set_yticks(y, tab.model)
-    fig.suptitle("固定效应与样条复杂度比较", fontsize=15, fontweight="bold")
-    fig.text(0.5, 0.01, "最终模型综合考虑简约性、BMI解释、问题二接口与组级验证，非机械选择最低AIC。",
+    fig.suptitle("模型选择、BMI效应与稳健性", fontsize=15, fontweight="bold")
+    fig.text(0.5, 0.01,
+             "最终模型兼顾简约性、BMI分解和后续决策接口；稳健性设定的系数均约为−0.0045。",
              ha="center", fontsize=9)
     fig.tight_layout(rect=(0, 0.04, 1, 0.95))
-    # 已手动调整布局，直接保存避免 helper 再次压缩脚注。
-    fig.savefig(FIG_DIR / "q1_04_model_comparison.png", bbox_inches="tight", facecolor="white")
-    fig.savefig(FIG_DIR / "q1_04_model_comparison.pdf", bbox_inches="tight", facecolor="white")
+    fig.savefig(FIG_DIR / "q1_03_model_evidence.png", bbox_inches="tight", facecolor="white")
+    fig.savefig(FIG_DIR / "q1_03_model_evidence.pdf", bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    print("saved figures/q1_v4/q1_04_model_comparison.(png|pdf)")
+    print("saved figures/q1_v4/q1_03_model_evidence.(png|pdf)")
 
 
 def plot_diagnostics(d: pd.DataFrame, final) -> None:
@@ -388,10 +433,10 @@ def plot_diagnostics(d: pd.DataFrame, final) -> None:
              "Shapiro–Wilk p<0.0001；Breusch–Pagan p<0.0001；红点为18个大残差事件（1.76%）。",
              ha="center", fontsize=9)
     fig.tight_layout(rect=(0, 0.035, 1, 0.96))
-    fig.savefig(FIG_DIR / "q1_05_diagnostics.png", bbox_inches="tight", facecolor="white")
-    fig.savefig(FIG_DIR / "q1_05_diagnostics.pdf", bbox_inches="tight", facecolor="white")
+    fig.savefig(FIG_DIR / "q1_04_diagnostics.png", bbox_inches="tight", facecolor="white")
+    fig.savefig(FIG_DIR / "q1_04_diagnostics.pdf", bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    print("saved figures/q1_v4/q1_05_diagnostics.(png|pdf)")
+    print("saved figures/q1_v4/q1_04_diagnostics.(png|pdf)")
 
 
 def grouped_cv_predictions(d: pd.DataFrame) -> pd.DataFrame:
@@ -474,7 +519,7 @@ def plot_grouped_cv(d: pd.DataFrame) -> None:
     ax.set(xlabel="测试折", ylabel="折内R²", title="C. 各折预测R²")
     ax.text(0.5, 0.97, "总体R²=-0.03986", transform=ax.transAxes, ha="center", va="top")
     fig.suptitle("按孕妇分组的5折交叉验证", fontsize=15, fontweight="bold")
-    save_figure(fig, "q1_06_grouped_cv")
+    save_figure(fig, "q1_05_grouped_cv")
 
 
 def cluster_boot_corr(d: pd.DataFrame, x: str, B: int = 1000) -> np.ndarray:
@@ -488,71 +533,6 @@ def cluster_boot_corr(d: pd.DataFrame, x: str, B: int = 1000) -> np.ndarray:
         arr = np.vstack([groups[m] for m in pick])
         out[b] = st.pearsonr(arr[:, 0], arr[:, 1]).statistic
     return out
-
-
-def plot_correlation(d: pd.DataFrame) -> None:
-    cols = ["week", "bmi", "age", "height", "weight", "y_conc"]
-    names = ["孕周", "BMI", "年龄", "身高", "体重", "Y浓度"]
-    corr = d[cols].corr(method="spearman")
-    boot_week = cluster_boot_corr(d, "week")
-    boot_bmi = cluster_boot_corr(d, "bmi")
-    vals = [np.mean(boot_week), np.mean(boot_bmi)]
-    cis = [np.percentile(boot_week, [2.5, 97.5]), np.percentile(boot_bmi, [2.5, 97.5])]
-
-    fig, axes = plt.subplots(1, 2, figsize=(12.5, 5.3), gridspec_kw={"width_ratios": [1.25, 1]})
-    sns.heatmap(corr, annot=True, fmt=".2f", cmap="vlag", center=0, vmin=-1, vmax=1,
-                xticklabels=names, yticklabels=names, square=True, cbar_kws={"shrink": 0.8},
-                ax=axes[0])
-    axes[0].set_title("A. 事件级Spearman相关（描述性）")
-    y = np.array([1, 0])
-    for i, (v, ci, color) in enumerate(zip(vals, cis, ["#4c78a8", "#d55e00"])):
-        axes[1].errorbar(v, y[i], xerr=[[v - ci[0]], [ci[1] - v]], fmt="o",
-                         color=color, capsize=5, lw=2.2)
-        axes[1].text(ci[1] + 0.01, y[i], f"[{ci[0]:+.3f}, {ci[1]:+.3f}]", va="center")
-    axes[1].axvline(0, color="#444444", ls="--", lw=1)
-    axes[1].set_yticks(y, ["孕周–Y浓度", "BMI–Y浓度"])
-    axes[1].set(xlabel="Pearson相关系数", xlim=(-0.32, 0.30),
-                title="B. 孕妇级Bootstrap 95%CI")
-    fig.suptitle("问题一相关特性", fontsize=15, fontweight="bold")
-    save_figure(fig, "q1_s01_correlation")
-
-
-def plot_within_between(d: pd.DataFrame) -> None:
-    dd = d[d.groupby("mother_id").mother_id.transform("size") >= 2].copy()
-    dd["dw"] = dd.week - dd.groupby("mother_id").week.transform("mean")
-    dd["dy"] = dd.y_conc - dd.groupby("mother_id").y_conc.transform("mean")
-    bw = d.groupby("mother_id").agg(week=("week", "mean"), y=("y_conc", "mean"))
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    sns.regplot(data=dd, x="dw", y="dy", scatter_kws={"s": 12, "alpha": 0.22},
-                line_kws={"color": "#d55e00", "lw": 2}, ax=axes[0])
-    axes[0].axhline(0, color="#777777", lw=0.8)
-    axes[0].axvline(0, color="#777777", lw=0.8)
-    axes[0].set(xlabel="孕周−该孕妇平均孕周", ylabel="Y浓度−该孕妇平均Y浓度",
-                title="A. 孕妇内关系：r=+0.5920")
-    sns.regplot(data=bw, x="week", y="y", scatter_kws={"s": 20, "alpha": 0.42},
-                line_kws={"color": "#d55e00", "lw": 2}, ax=axes[1])
-    axes[1].set(xlabel="孕妇平均孕周", ylabel="孕妇平均Y浓度",
-                title="B. 孕妇间关系：r=−0.2618")
-    fig.suptitle("孕周–Y浓度的组内与组间反号", fontsize=15, fontweight="bold")
-    save_figure(fig, "q1_s02_within_between")
-
-
-def plot_variance_components() -> None:
-    labels = ["孕妇间", "抽血间", "测序内"]
-    vals = np.array([OFFICIAL["var_mother"], OFFICIAL["var_draw"], OFFICIAL["var_tech"]])
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bars = ax.bar(labels, vals, color=["#4c78a8", "#e69f00", "#009e73"])
-    for bar, val in zip(bars, vals):
-        ax.text(bar.get_x() + bar.get_width() / 2, val + 0.00006, f"{val:.6f}",
-                ha="center", va="bottom")
-    lo, hi = OFFICIAL["tech_ci"]
-    ax.errorbar(2, OFFICIAL["tech_var"],
-                yerr=[[OFFICIAL["tech_var"] - lo], [hi - OFFICIAL["tech_var"]]],
-                color="#222222", capsize=5, lw=1.8, zorder=4, label="直接池化95%CI")
-    ax.set(ylabel="方差（sqrt(Y)尺度）", title="三层方差分解与技术误差")
-    ax.legend(frameon=False)
-    save_figure(fig, "q1_s03_variance_components")
 
 
 def load_coef() -> dict:
@@ -599,45 +579,14 @@ def earliest_week(bmi: float, p: float, C) -> float:
     return brentq(lambda w: float(probability(w, bmi, C) - p), scan[i], scan[i + 1])
 
 
-def plot_icc(C) -> None:
-    week = np.linspace(C["week_min"], C["week_max"], 361)
-    wc = week - C["mu_w"]
-    vre = C["s2u0"] + 2 * C["cov01"] * wc + C["s2u1"] * wc**2
-    icc = vre / (vre + C["s2e"])
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(week, icc, color="#1f4e79", lw=2.5)
-    ax.axvspan(25, 29, color="#777777", alpha=0.14, label="25周后稀疏区")
-    for wk in [12, 16, 20, 24]:
-        val = np.interp(wk, week, icc)
-        ax.scatter(wk, val, color="#d55e00", zorder=3)
-        ax.text(wk, val + 0.008, f"{val:.3f}", ha="center", fontsize=8)
-    ax.set(xlim=(11, 29), ylim=(0.75, 0.94), xlabel="孕周（周）", ylabel="ICC",
-           title="孕妇内相关系数随孕周变化")
-    ax.legend(frameon=False)
-    save_figure(fig, "q1_s04_icc_by_week")
-
-
-def plot_robustness() -> None:
-    tab = ROBUSTNESS.iloc[::-1].reset_index(drop=True)
-    fig, ax = plt.subplots(figsize=(9, 5.2))
-    ax.axvspan(OFFICIAL["between_boot"][0], OFFICIAL["between_boot"][1],
-               color="#4c78a8", alpha=0.14, label="主模型Bootstrap 95%CI")
-    ax.axvline(0, color="#444444", ls="--", lw=1)
-    ax.scatter(tab.coef, np.arange(len(tab)), s=60, color="#1f4e79", zorder=3)
-    for yy, val in enumerate(tab.coef):
-        ax.text(val + 0.00008, yy, f"{val:.5f}", va="center", fontsize=8)
-    ax.set_yticks(np.arange(len(tab)), tab.setting)
-    ax.set(xlabel="基线BMI系数（sqrt(Y)尺度）", title="不同数据口径下的基线BMI效应")
-    ax.legend(frameon=False)
-    save_figure(fig, "q1_s05_robustness")
-
-
-def plot_probability_surface(C) -> None:
+def plot_decision_interface(C) -> None:
+    """合并达标概率曲面和最早达标孕周，作为问题二接口。"""
     week = np.linspace(C["week_min"], C["week_max"], 361)
     bmi = np.linspace(20.7, 46.9, 270)
     W, B = np.meshgrid(week, bmi)
     P = probability(W, B, C)
-    fig, ax = plt.subplots(figsize=(10.5, 6.2))
+    fig, axes = plt.subplots(1, 2, figsize=(15.5, 6.2))
+    ax = axes[0]
     levels = np.linspace(0, 1, 21)
     cf = ax.contourf(W, B, P, levels=levels, cmap="viridis", extend="both")
     cs = ax.contour(W, B, P, levels=[0.5, 0.8, 0.9, 0.95], colors="white", linewidths=1.4)
@@ -647,57 +596,55 @@ def plot_probability_surface(C) -> None:
     cbar = fig.colorbar(cf, ax=ax, pad=0.02)
     cbar.set_label("P(Y≥4%)")
     ax.set(xlim=(11, 29), xlabel="孕周（周）", ylabel="基线BMI",
-           title="Y染色体浓度达到4%的模型概率")
-    fig.text(0.5, 0.01, "概率用于相对时点比较，尚未经过独立外部校准；25周后数据稀疏。",
-             ha="center", fontsize=9)
-    fig.tight_layout(rect=(0, 0.035, 1, 1))
-    fig.savefig(FIG_DIR / "q1_07_probability_surface.png", bbox_inches="tight", facecolor="white")
-    fig.savefig(FIG_DIR / "q1_07_probability_surface.pdf", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    print("saved figures/q1_v4/q1_07_probability_surface.(png|pdf)")
+           title="A. Y染色体浓度达到4%的模型概率")
 
-
-def plot_week_reach(C) -> None:
+    ax = axes[1]
     bmi = np.linspace(20.7, 46.9, 160)
     probs = [0.50, 0.80, 0.90, 0.95]
     colors = ["#009e73", "#56b4e9", "#e69f00", "#d55e00"]
-    fig, ax = plt.subplots(figsize=(10, 5.8))
     for p, color in zip(probs, colors):
         reach = np.array([earliest_week(x, p, C) for x in bmi])
         at_lower = np.isfinite(reach) & (reach <= C["week_min"] + 1e-8)
         regular = np.isfinite(reach) & ~at_lower
         ax.plot(bmi[regular], reach[regular], color=color, lw=2.2, label=f"目标概率 {p:.2f}")
-        ax.scatter(bmi[at_lower], reach[at_lower], facecolors="none", edgecolors=color,
-                   s=18, linewidths=0.8)
+        # 11周下界可能覆盖一整段BMI；稀疏标点即可表达截断，避免密集圆圈糊成色带。
+        lower_bmi = bmi[at_lower][::12]
+        lower_reach = reach[at_lower][::12]
+        ax.scatter(lower_bmi, lower_reach, facecolors="none", edgecolors=color,
+                   s=22, linewidths=0.9)
     ax.axhspan(25, 29, color="#777777", alpha=0.12, label="25周后稀疏区")
     ax.axhline(11, color="#444444", ls=":", lw=1)
     ax.text(46.6, 11.15, "空心点：触及11周观测下界", ha="right", fontsize=8)
     ax.set(xlim=(20.7, 46.9), ylim=(10.7, 29.2), xlabel="基线BMI",
-           ylabel="域内最早达标孕周", title="不同把握度下的最早达标孕周")
+           ylabel="域内最早达标孕周", title="B. 不同把握度下的最早达标孕周")
     ax.legend(frameon=False, ncol=2)
-    save_figure(fig, "q1_08_week_reach")
+    fig.suptitle("达标概率与最早达标孕周", fontsize=15, fontweight="bold")
+    fig.text(0.5, 0.01, "概率尚未经过独立外部校准，仅用于相对时点比较；25周后数据稀疏。",
+             ha="center", fontsize=9)
+    fig.tight_layout(rect=(0, 0.04, 1, 0.95))
+    fig.savefig(FIG_DIR / "q1_06_decision_interface.png", bbox_inches="tight", facecolor="white")
+    fig.savefig(FIG_DIR / "q1_06_decision_interface.pdf", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print("saved figures/q1_v4/q1_06_decision_interface.(png|pdf)")
 
 
 def main() -> None:
     setup_style()
+    # 目录仅保留本版本六张汇总图，避免旧版拆分图混入交付物。
+    for pattern in ("*.png", "*.pdf"):
+        for old in FIG_DIR.glob(pattern):
+            old.unlink()
     d, _ = load_data()
     final = fit_final(d)
     check_official(final, d)
     coef = load_coef()
 
-    plot_trajectory_coverage(d.copy())
+    plot_data_correlation(d.copy())
     plot_nonlinear_comparison(d, final)
-    plot_bmi_forest()
-    plot_model_comparison()
+    plot_model_evidence()
     plot_diagnostics(d, final)
     plot_grouped_cv(d)
-    plot_correlation(d)
-    plot_within_between(d)
-    plot_variance_components()
-    plot_icc(coef)
-    plot_robustness()
-    plot_probability_surface(coef)
-    plot_week_reach(coef)
+    plot_decision_interface(coef)
     print(f"完成：共生成 {len(list(FIG_DIR.glob('*.png')))} 张PNG和"
           f" {len(list(FIG_DIR.glob('*.pdf')))} 张PDF。")
 
