@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-q1_model.py —— 甲：问题一（v3，孕周效应改为自然三次样条，不再用二次多项式）
+q1_model.py —— 甲：问题一（v4，中心化自然三次样条 + 严格数值有效性检查）
+
+v4 修复 v3 的关键数值问题：含截距模型直接使用 cr(..., df=5) 时，样条基
+与截距线性相关，设计矩阵秩亏（条件数约 1e16），会产生巨大的标准误和不可信
+的 Wald 检验。现在使用 constraints='center' 的中心化自然样条；并经 ML 的
+df=3~6 比较选择 df=3，避免在 25 周后的稀疏数据区过拟合。
 
 v3 相对 v2 的变更（原因：非参数 LOWESS/GAM 检查发现孕周效应形状是
 「早期快速上升 -> 16~20周平台期 -> 24~29周加速」，二次多项式结构性地
@@ -35,6 +40,7 @@ v2 相对 v1 的修复（仍然保留，见下）：
 """
 from __future__ import annotations
 
+import atexit
 import sys
 import warnings
 from pathlib import Path
@@ -63,18 +69,85 @@ ROWLV = ROOT / 'data' / 'processed' / 'male_clean.csv'
 OUT = ROOT / 'outputs'
 OUT.mkdir(exist_ok=True)
 SEP = '=' * 78
-SPLINE_DF = 5
-WEEK_TERM = f'cr(week_c, df={SPLINE_DF})'  # 自然三次样条：真正的非线性孕周项
+
+
+class _Tee:
+    """把 print 同时写到控制台和 UTF-8 日志文件。
+
+    不要再用 `python src/q1_model.py > outputs/q1_out.txt` 这种 shell 重定向：
+    Windows PowerShell 的 `>` 默认写 UTF-16LE，导致日志被 grep/编辑器读成乱码。
+    由脚本自己按 UTF-8 落盘，跨平台、跨终端都一致。
+    """
+
+    def __init__(self, stream, path):
+        self.stream = stream
+        self.file = open(path, 'w', encoding='utf-8', newline='\n')
+
+    def write(self, s):
+        self.stream.write(s)
+        self.file.write(s)
+        return len(s)
+
+    def flush(self):
+        self.stream.flush()
+        self.file.flush()
+
+
+LOG_PATH = OUT / ('q1_out_fast.txt' if FAST else 'q1_out.txt')
+sys.stdout = _Tee(sys.stdout, LOG_PATH)
+atexit.register(sys.stdout.flush)
+SPLINE_DF = 3
+# constraints='center' 使样条列与截距正交，避免 cr() 默认基与截距共同进入
+# 模型时的精确秩亏；df 由下方 ML 比较在 3~6 中选择。
+WEEK_TERM = f"cr(week_c, df={SPLINE_DF}, constraints='center')"
 
 if FAST:
     print('*** --fast 模式：单优化器 + Bootstrap 降到 200 次，仅供开发调试，'
           '数字不得写入论文 ***')
 
 
+def cov_is_valid(m, tol=-1e-8, max_design_cond=1e10, max_cov_cond=1e12):
+    """同时检查可辨识性、固定效应协方差和随机效应方差。
+
+    ``converged=True`` 只表示优化器停止；仅检查协方差对角线非负也不够，因为
+    秩亏设计可能给出全为正但大到 1e10 的方差。这里把不能解释/不能复现的解
+    直接挡在结果表和导出接口之外。
+    """
+    try:
+        exog = np.asarray(m.model.exog, float)
+        if np.linalg.matrix_rank(exog) < exog.shape[1]:
+            return False
+        design_cond = np.linalg.cond(exog)
+        if not np.isfinite(design_cond) or design_cond > max_design_cond:
+            return False
+
+        fe_names = list(m.fe_params.index)
+        vcov_fe = np.asarray(m.cov_params().loc[fe_names, fe_names], float)
+        if not np.all(np.isfinite(vcov_fe)) or not np.allclose(
+                vcov_fe, vcov_fe.T, atol=1e-8, rtol=1e-6):
+            return False
+        eig_fe = np.linalg.eigvalsh((vcov_fe + vcov_fe.T) / 2)
+        if eig_fe.min() < tol or eig_fe.max() / max(eig_fe.min(), 1e-15) > max_cov_cond:
+            return False
+
+        cov_re = np.asarray(m.cov_re, float)
+        if not np.all(np.isfinite(cov_re)):
+            return False
+        if np.linalg.eigvalsh((cov_re + cov_re.T) / 2).min() < tol:
+            return False
+        if not np.isfinite(float(m.scale)) or float(m.scale) <= 0:
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def fit_mixed(formula, data, groups, re_formula=None, vc_formula=None,
               reml=True, methods=METHODS,
               maxiter=300, label=''):
-    """稳健拟合：多优化器重试，只接受 .converged=True 的结果；全部失败则
+    """稳健拟合：多优化器重试，只接受「.converged=True 且协方差矩阵有效」的
+    结果——两个条件缺一不可，且不按对数似然最大选，因为似然更高的解可能协
+    方差是垃圾（本函数专门修复这一坑，见 cov_is_valid 的注释）。全部失败则
     显式打印警告并标注，不得被当作正常结论使用。"""
     best, tried = None, []
     for method in methods:
@@ -88,8 +161,9 @@ def fit_mixed(formula, data, groups, re_formula=None, vc_formula=None,
             tried.append(f'{method}:异常')
             continue
         conv = bool(getattr(m, 'converged', False))
-        tried.append(f'{method}:{"收敛" if conv else "未收敛"}')
-        if conv and (best is None or m.llf > best.llf):
+        cov_ok = conv and cov_is_valid(m)
+        tried.append(f'{method}:{"收敛且协方差有效" if cov_ok else ("收敛但协方差无效" if conv else "未收敛")}')
+        if cov_ok and (best is None or m.llf > best.llf):
             best = m
     if best is not None:
         return best, True, tried
@@ -97,7 +171,8 @@ def fit_mixed(formula, data, groups, re_formula=None, vc_formula=None,
         warnings.simplefilter('ignore')
         m = smf.mixedlm(formula, data, groups=groups, re_formula=re_formula,
                         vc_formula=vc_formula).fit(reml=reml, maxiter=maxiter)
-    print(f'  !! [{label}] 全部优化器未收敛（{tried}），此结果仅供参考，不作为结论依据')
+    print(f'  !! [{label}] 全部优化器都未能给出「收敛且协方差有效」的结果'
+          f'（{tried}），此结果仅供参考，不作为结论依据')
     return m, False, tried
 
 
@@ -133,6 +208,9 @@ print(f'Y浓度(事件均值) 均值 {d.y_conc.mean():.4f} 中位 {d.y_conc.medi
 print(f'孕周观测范围 [{WEEK_MIN:.2f}, {WEEK_MAX:.2f}]；样条外无法可靠外推，'
       f'问题二反解严格限制在此区间内')
 print(f'BMI {d.bmi.min():.2f}~{d.bmi.max():.2f}')
+for cut in (25, 27):
+    tail = d[d.week >= cut]
+    print(f'  稀疏尾部 week>={cut}: {len(tail)} 个事件 / {tail.mother_id.nunique()} 位孕妇')
 print(f'事件级达标(均值口径>=4%)占比 {d.qual_mean.mean():.3f}；'
       f'曾达标孕妇 {int(d.groupby("mother_id").reached.first().sum())}/{d.mother_id.nunique()}')
 print(f'\n首次(基线) BMI 与孕妇均值 BMI 相关 r={R_FIRST_MEAN:.4f}'
@@ -148,20 +226,29 @@ r3['resp'] = np.sqrt(r3.y_conc)
 r3['week_c'] = r3.week - r3.week.mean()
 r3['bmi_c'] = r3.bmi - r3.bmi.mean()
 r3['draw_key'] = r3.mother_id + '_' + r3.draw_idx.astype(str)
+# 技术误差只由同次抽血的重复测序之差识别。直接池化事件内平方差比三层模型
+# 的残差方差更透明，也不会把没有重复测序的事件误计为技术误差信息。
+rep_rows = r3[r3.groupby('draw_key').draw_key.transform('size') >= 2]
+ss_tech = float(rep_rows.groupby('draw_key').resp.apply(
+    lambda x: ((x - x.mean()) ** 2).sum()).sum())
+df_tech = int(rep_rows.groupby('draw_key').size().sub(1).sum())
+s2_tech = ss_tech / df_tech
+chi_low, chi_high = st.chi2.ppf([.025, .975], df_tech)
+tech_lo, tech_hi = df_tech * s2_tech / chi_high, df_tech * s2_tech / chi_low
+print(f'重复测序的事件内直接池化估计（{rep_rows.draw_key.nunique()} 个事件，df={df_tech}）：')
+print(f'  测序内方差 {s2_tech:.6f}  近似 95% CI [{tech_lo:.6f}, {tech_hi:.6f}]')
+print(f'  SD ≈ {np.sqrt(s2_tech):.4f}（sqrt 尺度），近似 CI [{np.sqrt(tech_lo):.4f}, {np.sqrt(tech_hi):.4f}]')
+
+# 三层模型只作为方差分解的交叉核验；数值无效时不输出伪精确分量。
 m3l, conv0, _ = fit_mixed(f'resp ~ {WEEK_TERM} + bmi_c', r3, groups=r3.mother_id,
                           re_formula='~week_c', vc_formula={'draw': '0+C(draw_key)'},
                           label='三层嵌套-技术误差')
-s2_tech = float(m3l.scale)
-n_rep_events = int((d.y_conc_n >= 2).sum())
-df_tech = max(n_rep_events - 1, 1)
-chi_lo, chi_hi = st.chi2.ppf([.975, .025], df_tech)
-tech_lo, tech_hi = s2_tech * df_tech / chi_hi, s2_tech * df_tech / chi_lo
-print(f'三层嵌套（孕妇/抽血/测序，收敛={conv0}）分解 sqrt(Y) 的方差：')
-print(f'  孕妇间   {float(m3l.cov_re.iloc[0,0]):.6f}')
-print(f'  抽血间   {float(m3l.vcomp[0]):.6f}')
-print(f'  测序内（测序内误差估计，仅 {n_rep_events} 个重复事件支撑）'
-      f'  {s2_tech:.6f}  近似 95% CI [{tech_lo:.6f}, {tech_hi:.6f}]')
-print(f'  SD ≈ {np.sqrt(s2_tech):.4f}（sqrt 尺度），近似 CI [{np.sqrt(tech_lo):.4f}, {np.sqrt(tech_hi):.4f}]')
+print(f'三层嵌套方差分解交叉核验（收敛且数值有效={conv0}）：')
+if conv0:
+    print(f'  孕妇间 {float(m3l.cov_re.iloc[0,0]):.6f}；'
+          f'抽血间 {float(m3l.vcomp[0]):.6f}；残差 {float(m3l.scale):.6f}')
+else:
+    print('  数值无效，不报告三层模型方差分量；技术误差采用上方直接池化估计。')
 
 # ============ 部件0.5：线性回归基线对照 + 孕周形状的非参数检查 ============
 print('\n' + SEP + '\n【部件0.5】非线性检验：线性回归基线 + 二次多项式 vs 样条的形状对照')
@@ -258,17 +345,21 @@ d['bmi_between_c'] = d.bmi_baseline - MU_BB
 d['age_c'] = d.age - d.age.mean()
 
 m_naive_bmi, c1, _ = fit_mixed(f'resp ~ {WEEK_TERM} + bmi_c', d, groups=d.mother_id,
-                               re_formula='~week_c', label='BMI朴素单系数')
+                               re_formula='~week_c', reml=False, label='BMI朴素单系数-ML')
 m_split_bmi, c2, _ = fit_mixed(f'resp ~ {WEEK_TERM} + bmi_between_c + bmi_within',
-                               d, groups=d.mother_id, re_formula='~week_c', label='BMI拆分')
-stat = 2 * (m_split_bmi.llf - m_naive_bmi.llf)
-p_split = st.chi2.sf(stat, 1)
+                               d, groups=d.mother_id, re_formula='~week_c', reml=False,
+                               label='BMI拆分-ML')
+stat = max(0.0, 2 * (m_split_bmi.llf - m_naive_bmi.llf)) if c1 and c2 else np.nan
+p_split = st.chi2.sf(stat, 1) if np.isfinite(stat) else np.nan
 print(f'朴素单系数模型（收敛={c1}）：bmi 系数 = {m_naive_bmi.fe_params["bmi_c"]:.5f}')
 print(f'拆分模型（收敛={c2}）：between = {m_split_bmi.fe_params["bmi_between_c"]:.5f}，'
       f'within = {m_split_bmi.fe_params["bmi_within"]:.5f}')
-print(f'LRT(H0: between系数=within系数): chi2={stat:.3f}, df=1, p={p_split:.3e}')
-print(('-> 拒绝 H0：必须拆分，between（基线BMI）才是 Q2 分组应使用的量。' if p_split < 0.05
-       else '-> 未拒绝 H0，但为可解释性仍采用拆分模型。'))
+print(f'ML-LRT(H0: between系数=within系数): chi2={stat:.3f}, df=1, p={p_split:.3e}')
+if not np.isfinite(p_split):
+    print('-> 至少一个比较模型数值无效，LRT 不报告结论。')
+else:
+    print(('-> 拒绝 H0：必须拆分，between（基线BMI）才是 Q2 分组应使用的量。'
+           if p_split < 0.05 else '-> 未拒绝 H0，但为可解释性仍采用拆分模型。'))
 
 # ============ 部件3a：随机效应结构（在样条孕周结构下重新检验） ============
 print('\n' + SEP + '\n【部件3a】随机效应结构：为什么不能用 OLS')
@@ -302,14 +393,20 @@ specs = {
     'M5 M4+week线性x bmi_between交互': F_SPLIT + ' + week_c:bmi_between_c',
     'M6 M4+age': F_SPLIT + ' + age_c',
     'M7 M4用身高体重替代between': (f'resp ~ {WEEK_TERM} + bmi_within + height + weight'),
+    'S4 样条df=4': "resp ~ cr(week_c, df=4, constraints='center') + bmi_between_c + bmi_within",
+    'S5 样条df=5': "resp ~ cr(week_c, df=5, constraints='center') + bmi_between_c + bmi_within",
+    'S6 样条df=6': "resp ~ cr(week_c, df=6, constraints='center') + bmi_between_c + bmi_within",
 }
-fits, rec = {}, []
+fits, fit_ok, rec = {}, {}, []
 for n, f in specs.items():
     m, conv, _ = fit_mixed(f, d, groups=d.mother_id, re_formula=RE_F, reml=False, label=n)
     fits[n] = m
+    fit_ok[n] = conv
     k = len(m.params) + 1
-    rec.append([n, len(m.fe_params), m.llf, -2 * m.llf + 2 * k,
-                -2 * m.llf + k * np.log(len(d)), conv])
+    llf = float(m.llf) if conv else np.nan
+    rec.append([n, len(m.fe_params), llf,
+                (-2 * llf + 2 * k) if conv else np.nan,
+                (-2 * llf + k * np.log(len(d))) if conv else np.nan, conv])
 cmp = pd.DataFrame(rec, columns=['模型', '固定效应数', 'logLik', 'AIC', 'BIC', '收敛'])
 cmp['dAIC'] = (cmp.AIC - cmp.AIC.min()).round(2)
 cmp['dBIC'] = (cmp.BIC - cmp.BIC.min()).round(2)
@@ -320,7 +417,10 @@ print(f'\n样条(M3) 相对二次多项式(M3q) 的 AIC 优势: '
 
 
 def lrt(a, b, name):
-    stat = 2 * (fits[b].llf - fits[a].llf)
+    if not fit_ok[a] or not fit_ok[b]:
+        print(f'  {name:28s} 至少一个模型数值无效，不报告 LRT')
+        return
+    stat = max(0.0, 2 * (fits[b].llf - fits[a].llf))
     df = len(fits[b].params) - len(fits[a].params)
     print(f'  {name:28s} chi2 = {stat:7.3f}, df = {df}, p = {st.chi2.sf(stat, df):.3e}')
 
@@ -339,7 +439,7 @@ final, c_final, tried_final = fit_mixed(FINAL_F, d, groups=d.mother_id, re_formu
                                         reml=True, label='最终模型-REML')
 print(f'收敛状态: {c_final}（尝试记录: {tried_final}）')
 if not c_final:
-    print('!!! 最终模型未收敛，以下数字仅供参考 !!!')
+    raise RuntimeError('最终模型未得到收敛且数值有效的解；停止报告和导出，不能把病态结果写进论文。')
 fe = final.fe_params
 ci = final.conf_int()
 print('固定效应（样条基函数系数本身不直接解释，看下方的曲线取值）：')
@@ -394,7 +494,14 @@ for wk in [12, 16, 20, 24]:
 y_tr, X_tr = patsy.dmatrices(FINAL_F, d, return_type='dataframe')
 DESIGN_INFO = X_tr.design_info
 GRID_STEP = 0.02
-week_grid = np.arange(WEEK_MIN, WEEK_MAX + 1e-9, GRID_STEP)
+# 用 linspace 而非 arange 构造网格：arange 在浮点步长累积下终点会漂移
+# （实测 29.00 会变成 28.999999999999616），导致边界查询被 np.interp 的
+# left/right=NaN 误判为"超出范围"。linspace 用 (终点-起点)/步长 反推点数，
+# 保证终点严格等于 WEEK_MAX。
+n_grid = int(round((WEEK_MAX - WEEK_MIN) / GRID_STEP)) + 1
+week_grid = np.linspace(WEEK_MIN, WEEK_MAX, n_grid)
+assert week_grid[0] == WEEK_MIN and week_grid[-1] == WEEK_MAX, \
+    f'网格端点未精确对齐: {week_grid[0]} / {week_grid[-1]}'
 grid_df = pd.DataFrame({'week_c': week_grid - MU_W,
                         'bmi_between_c': 0.0, 'bmi_within': 0.0})
 Xg = patsy.build_design_matrices([DESIGN_INFO], grid_df, return_type='dataframe')[0]
@@ -412,6 +519,7 @@ print(f'16~20周平台段的平均斜率 = {d1[plateau_idx].mean():.5f}'
       f'（对照 11~15周 = {d1[(week_grid[:-1]>=11)&(week_grid[:-1]<=15)].mean():.5f}，'
       f'24~28周 = {d1[(week_grid[:-1]>=24)&(week_grid[:-1]<=28)].mean():.5f}）')
 print('  -> 中段明显放缓，两端明显更陡，量化确认了样条捕捉到的「平台」现象')
+print('  ⚠️ 25周以后仅11位、27周以后仅3位孕妇；末段斜率与25~29周反解只作探索性结果。')
 
 vf = float(np.var(np.asarray(final.model.exog) @ fe.values, ddof=1))
 vr = s2u0 + (s2u1 * float(np.var(d.week_c, ddof=1)) if USE_RS else 0.0)
@@ -420,6 +528,63 @@ cond_r2 = (vf + vr) / (vf + vr + s2e)
 print(f'\n边际 R2 = {marg_r2:.4f}   条件 R2 = {cond_r2:.4f}')
 print(f'对照【部件0.5】普通线性回归 R2 = {lin.rsquared:.4f}：'
       f'条件 R2 提升 {cond_r2 - lin.rsquared:+.4f}')
+
+# 训练内 R² 会被随机效应显著抬高；按孕妇分组的 CV 才回答“对未见过孕妇
+# 能否预测”。每折只用训练孕妇拟合，测试孕妇用固定效应预测。
+print('\n按孕妇分组的 5 折交叉验证（新孕妇、固定效应预测）：')
+rng_cv = np.random.default_rng(2024)
+cv_ids = rng_cv.permutation(d.mother_id.unique())
+folds = np.array_split(cv_ids, 5)
+cv_rows = []
+for fold_no, test_ids in enumerate(folds, 1):
+    tr = d[~d.mother_id.isin(test_ids)].copy()
+    te = d[d.mother_id.isin(test_ids)].copy()
+    # 所有中心化常数只由训练折估计，避免把测试折分布泄漏到训练过程。
+    for frame in (tr, te):
+        frame['week_c'] = frame.week - tr.week.mean()
+        frame['bmi_between_c'] = frame.bmi_baseline - tr.bmi_baseline.mean()
+        frame['age_c'] = frame.age - tr.age.mean()
+        frame['height_c'] = frame.height - tr.height.mean()
+        frame['weight_c'] = frame.weight - tr.weight.mean()
+    cv_specs = {
+        '线性': 'resp ~ week_c + bmi_between_c + bmi_within',
+        '中心化样条': FINAL_F,
+        '样条+年龄': FINAL_F + ' + age_c',
+        '样条+身高体重': f'resp ~ {WEEK_TERM} + bmi_within + height_c + weight_c',
+    }
+    for label, formula in cv_specs.items():
+        cv_m, cv_ok, _ = fit_mixed(formula, tr, groups=tr.mother_id,
+                                   re_formula=RE_F, reml=False,
+                                   methods=('lbfgs', 'powell'), maxiter=200,
+                                   label=f'CV{fold_no}-{label}')
+        if not cv_ok:
+            continue
+        pred_resp = np.asarray(cv_m.predict(te), float)
+        pred_y = pred_resp ** 2 + float(cv_m.scale)
+        cv_rows.append(dict(fold=fold_no, model=label, n=len(te),
+                            sse_resp=float(np.sum((te.resp.values - pred_resp) ** 2)),
+                            sae_resp=float(np.sum(np.abs(te.resp.values - pred_resp))),
+                            sst_resp=float(np.sum((te.resp.values - tr.resp.mean()) ** 2)),
+                            sse_y=float(np.sum((te.y_conc.values - pred_y) ** 2)),
+                            sae_y=float(np.sum(np.abs(te.y_conc.values - pred_y))),
+                            sst_y=float(np.sum((te.y_conc.values - tr.y_conc.mean()) ** 2))))
+cv = pd.DataFrame(cv_rows)
+if len(cv):
+    cv_sum = cv.groupby('model').agg(n=('n', 'sum'), folds=('fold', 'nunique'),
+                                    sse_resp=('sse_resp', 'sum'), sae_resp=('sae_resp', 'sum'),
+                                    sst_resp=('sst_resp', 'sum'), sse_y=('sse_y', 'sum'),
+                                    sae_y=('sae_y', 'sum'), sst_y=('sst_y', 'sum'))
+    cv_sum['R2_sqrt'] = 1 - cv_sum.sse_resp / cv_sum.sst_resp
+    cv_sum['RMSE_sqrt'] = np.sqrt(cv_sum.sse_resp / cv_sum.n)
+    cv_sum['MAE_sqrt'] = cv_sum.sae_resp / cv_sum.n
+    cv_sum['R2_Y'] = 1 - cv_sum.sse_y / cv_sum.sst_y
+    cv_sum['RMSE_Y'] = np.sqrt(cv_sum.sse_y / cv_sum.n)
+    cv_sum['MAE_Y'] = cv_sum.sae_y / cv_sum.n
+    print(cv_sum[['n', 'folds', 'R2_sqrt', 'RMSE_sqrt', 'MAE_sqrt',
+                  'R2_Y', 'RMSE_Y', 'MAE_Y']].round(5).to_string())
+    print('  解释：R²<=0 表示对新孕妇的预测不优于训练集均值；条件R²不能替代该指标。')
+else:
+    print('  所有折均拟合失败，不能报告泛化性能。')
 
 # ============ 部件5：诊断与稳健性 ============
 print('\n' + SEP + '\n【部件5】模型诊断')
@@ -449,16 +614,19 @@ robch, c_ch, _ = fit_mixed(FINAL_F, ch, groups=ch.mother_id, re_formula=RE_F, la
 print(f'各稳健性设定的收敛状态：行级朴素={c_nv}  行级三层嵌套={c_ns}  '
       f'QC过滤={c_qc}  剔时序异常={c_ch}')
 print(f'\nBMI(between) 系数对比（均为样条孕周结构）：')
-print(f'  主模型 事件级(n={len(d)})       {final.fe_params["bmi_between_c"]:.5f}  '
-      f'p={final.pvalues["bmi_between_c"]:.4f}')
-print(f'  行级三层嵌套(n={len(r3)})       {nest.fe_params["bmi_between_c"]:.5f}  '
-      f'p={nest.pvalues["bmi_between_c"]:.4f}')
-print(f'  行级朴素[未拆技术重复](n={len(r3)}) {naive.fe_params["bmi_between_c"]:.5f}  '
-      f'p={naive.pvalues["bmi_between_c"]:.4f}')
-print(f'  QC过滤(n={len(qc)})             {robqc.fe_params["bmi_between_c"]:.5f}  '
-      f'p={robqc.pvalues["bmi_between_c"]:.4f}')
-print(f'  剔时序异常(n={len(ch)})         {robch.fe_params["bmi_between_c"]:.5f}  '
-      f'p={robch.pvalues["bmi_between_c"]:.4f}')
+def report_robust(label, m, ok, n):
+    if ok:
+        print(f'  {label}(n={n}) {m.fe_params["bmi_between_c"]:.5f}  '
+              f'p={m.pvalues["bmi_between_c"]:.4f}')
+    else:
+        print(f'  {label}(n={n}) 数值无效，不报告系数')
+
+
+report_robust('主模型 事件级', final, c_final, len(d))
+report_robust('行级三层嵌套', nest, c_ns, len(r3))
+report_robust('行级朴素[未拆技术重复]', naive, c_nv, len(r3))
+report_robust('QC过滤', robqc, c_qc, len(qc))
+report_robust('剔时序异常', robch, c_ch, len(ch))
 
 print(f'\n聚类 Bootstrap（目标 {N_BOOT} 次重抽，逐次检查收敛，仅用收敛结果计算区间）：')
 rng = np.random.default_rng(0)
@@ -472,9 +640,18 @@ for _ in range(N_BOOT):
     try:
         with warnings.catch_warnings(record=True):
             warnings.simplefilter('ignore')
-            bm = smf.mixedlm(FINAL_F, sub, groups=sub.g, re_formula=RE_F).fit(
-                reml=False, method='lbfgs', maxiter=100)
-        if bool(getattr(bm, 'converged', False)):
+            boot_model = smf.mixedlm(FINAL_F, sub, groups=sub.g, re_formula=RE_F)
+            bm = None
+            for method in ('lbfgs', 'powell'):
+                try:
+                    bm_try = boot_model.fit(reml=False, method=method, maxiter=200,
+                                            start_params=final.params.values)
+                except Exception:
+                    continue
+                if bool(getattr(bm_try, 'converged', False)) and cov_is_valid(bm_try):
+                    bm = bm_try
+                    break
+        if bm is not None:
             boot_between.append(bm.fe_params['bmi_between_c'])
             boot_within.append(bm.fe_params['bmi_within'])
         else:
@@ -502,16 +679,23 @@ COEF = dict(scale='sqrt(y)', week_grid=week_grid, week_effect_grid=week_effect_g
             mu_w=MU_W, mu_bb=MU_BB, s2u0=s2u0, s2u1=s2u1, cov01=cov01, s2e=s2e,
             thr_resp=float(np.sqrt(0.04)), s2_tech=s2_tech,
             g0=G0, g1=G1, g_var=G_VAR, level='event', converged=c_final,
-            model='spline_df5_mixed')
+            model=f'spline_df{SPLINE_DF}_centered_mixed')
 
 
 def mean_resp(week, bmi_baseline, C=COEF):
     """均值预测：孕周项用样条网格插值（训练范围外返回 NaN），
-    基线 BMI 已知，孕期内 BMI 漂移用总体线性趋势外推。"""
+    基线 BMI 已知，孕期内 BMI 漂移用总体线性趋势外推。
+
+    注意：判断"是否超出训练范围"用容差比较（TOL），不依赖 np.interp 的
+    left/right=NaN 在浮点边界上的精确相等判断——此前踩过这个坑：网格终点
+    因浮点累积漂移到 28.999999999999616，导致查询 week=29.0 被误判为越界。
+    现在先用容差裁剪到 [week_min, week_max] 再插值，越界判断单独做。"""
     week = np.asarray(week, float)
-    out_of_range = (week < C['week_min']) | (week > C['week_max'])
-    week_eff = np.interp(week, C['week_grid'], C['week_effect_grid'],
-                         left=np.nan, right=np.nan)
+    TOL = 1e-6
+    out_of_range = (week < C['week_min'] - TOL) | (week > C['week_max'] + TOL)
+    week_clipped = np.clip(week, C['week_min'], C['week_max'])
+    week_eff = np.interp(week_clipped, C['week_grid'], C['week_effect_grid'])
+    week_eff = np.where(out_of_range, np.nan, week_eff)
     if np.any(out_of_range):
         print(f'  ⚠️ week_reach/predict 查询超出样条训练范围 '
               f'[{C["week_min"]},{C["week_max"]}]，已返回 NaN（拒绝外推）')
@@ -546,14 +730,19 @@ def week_reach(bmi_baseline, thr=0.04, p=0.9, C=COEF, lo=None, hi=None):
     lo = C['week_min'] if lo is None else max(lo, C['week_min'])
     hi = C['week_max'] if hi is None else min(hi, C['week_max'])
     f = lambda t: prob_qualified(t, bmi_baseline, thr, C) - p
-    flo, fhi = f(lo), f(hi)
-    if np.isnan(flo) or np.isnan(fhi):
+    # 样条不保证单调，不能只看区间两个端点；扫描网格并返回第一处上穿。
+    scan = C['week_grid'][(C['week_grid'] >= lo) & (C['week_grid'] <= hi)]
+    scan = np.unique(np.r_[lo, scan, hi])
+    vals = np.asarray([f(t) for t in scan], float)
+    if np.any(np.isnan(vals)):
         return np.nan
-    if flo >= 0:
-        return lo
-    if fhi < 0:
+    if vals[0] >= 0:
+        return float(scan[0])
+    crossing = np.where((vals[:-1] < 0) & (vals[1:] >= 0))[0]
+    if not len(crossing):
         return np.nan
-    return brentq(f, lo, hi)
+    i = int(crossing[0])
+    return brentq(f, float(scan[i]), float(scan[i + 1]))
 
 
 def main():
@@ -571,8 +760,9 @@ def main():
                          else (f'  <={WEEK_MIN:.0f}*' if t <= WEEK_MIN + 0.001 else f'{t:6.2f}'))
         print(f'    {bb:>3}   ' + '    '.join(cells))
     print(f'  （* = 触达观测下界 {WEEK_MIN:.0f} 周，真实达标孕周可能更早，但数据未覆盖，属外推提示）')
-    np.save(OUT / 'q1_coef.npy', COEF, allow_pickle=True)
-    print(f'\n系数已保存 {(OUT / "q1_coef.npy").relative_to(ROOT)}'
+    coef_path = OUT / ('q1_coef_fast.npy' if FAST else 'q1_coef.npy')
+    np.save(coef_path, COEF, allow_pickle=True)
+    print(f'\n系数已保存 {coef_path.relative_to(ROOT)}'
           f'（孕周项为样条网格，问题二用前应检查 converged 标记），'
           f'用 np.load(..., allow_pickle=True).item() 载入。')
     print('\n接口签名提示：predict_y / prob_qualified / week_reach 的第二参数是')
