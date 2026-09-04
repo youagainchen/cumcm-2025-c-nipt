@@ -41,7 +41,7 @@ paper/            论文与格式参考
     —— 问题二首达/删失默认均值口径并附 `*_any` 对照，见 [docs/data_dictionary.md](docs/data_dictionary.md)。
 - 文档：列命名映射、字段含义、纪律与**对照评阅要点的处理立场**见 [`docs/data_dictionary.md`](docs/data_dictionary.md)；数字画像（含技术重复量化）见 [`docs/data_report.md`](docs/data_report.md)。
 
-## 阶段一问题一状态（甲）
+## 阶段一问题一状态
 
 - 建模脚本：`python src/q1_model.py`（依赖 `data/processed/male_clean.csv`，先跑 `src/clean.py`）。
 - 产物（`outputs/`，不入库）：`q1_out.txt` 完整日志、`q1_coef.npy` 最终模型系数（问题二直接载入）。
