@@ -297,7 +297,8 @@ def aft_is_valid(fit: object) -> bool:
 
 def export_aft(best_spec: str, best_dist: str, fit: object,
                specs: dict[str, list[str]], subject: pd.DataFrame,
-               stats: dict[str, tuple[float, float]], path: Path) -> dict:
+               stats: dict[str, tuple[float, float]], path: Path,
+               technical_time_sd: float = 0.0) -> dict:
     labels = [tuple(label) for label in fit.params_.index]
     values = fit.params_.to_numpy(float)
     covariance = fit.variance_matrix_.to_numpy(float)
@@ -308,6 +309,9 @@ def export_aft(best_spec: str, best_dist: str, fit: object,
         "feature_stats": stats, "week_min": WEEK_MIN, "week_max": WEEK_MAX,
         "threshold": 0.04, "mother_count": int(len(subject)),
         "censor_counts": subject["censored"].value_counts().to_dict(),
+        # 测序内误差折算到孕周尺度的标准差，供 probability_variants() 构造
+        # 检测误差情景；由 estimate_technical_time_sd() 用 delta 法得到。
+        "technical_time_sd": float(technical_time_sd),
     }
     np.save(path, payload, allow_pickle=True)
     return payload
@@ -371,6 +375,75 @@ def prob_fn_from_payload(payload: dict, param_values=None):
 def load_prob_fn(path: Path = MODEL_PATH):
     payload = np.load(path, allow_pickle=True).item()
     return prob_fn_from_payload(payload)
+
+
+def _scale_label(payload: dict) -> tuple[str, float]:
+    """返回 (尺度参数在 param_labels 中的名称, 该参数当前的对数值)。
+
+    三种 AFT 的尺度参数在 lifelines 中命名不同，但都以对数形式存放。
+    """
+    name = {"LogNormal": "sigma_", "Weibull": "rho_", "LogLogistic": "beta_"}[payload["model"]]
+    labels = [tuple(x) for x in payload["param_labels"]]
+    index = labels.index((name, "Intercept"))
+    return name, float(np.asarray(payload["param_values"], float)[index])
+
+
+def probability_variants(path: Path = MODEL_PATH) -> dict:
+    """检测误差情景下的概率函数族，供 q3_sensitivity 重新执行完整分组优化。
+
+    与问题一、二"去掉/加倍测序内方差"的做法保持一致，但问题三的模型建在
+    达标时间 T 上而不是浓度 Y 上，因此需要先把测序内误差折算到时间尺度：
+
+        tau = sqrt(s2_tech) / median|d sqrt(Y) / d week|        （delta 法）
+
+    再按对数尺度近似合成。设中位达标时间为 T_med，则测序误差在 log T 上
+    贡献的标准差约为 tau / T_med，于是
+
+        观测尺度   sigma^2 = sigma_latent^2 + (tau / T_med)^2
+
+    据此构造三个情景：
+
+        baseline           拟合所得模型，误差已隐含在 sigma 内
+        remove_technical   扣除测序误差分量，逼近"无测量误差"的潜在分布
+        double_technical   再加一份同量误差，模拟测序质量下降
+
+    注意这三个情景改变的是达标时间分布的**离散度**而非位置：测序误差不会
+    系统性提前或推迟达标，但会让"某一周是否已达标"更不确定，从而影响最优
+    检测时点与分组。返回值可直接交给优化器重跑动态规划。
+    """
+    payload = np.load(path, allow_pickle=True).item()
+    tau = float(payload.get("technical_time_sd", 0.0))
+    name, log_scale = _scale_label(payload)
+    labels = [tuple(x) for x in payload["param_labels"]]
+    index = labels.index((name, "Intercept"))
+    values = np.asarray(payload["param_values"], float)
+
+    variants = {"baseline": prob_fn_from_payload(payload)}
+    if not np.isfinite(tau) or tau <= 0:
+        return variants
+
+    # 以样本均值协变量处的中位达标时间作为折算基准
+    location_index = labels.index(("mu_", "Intercept")) if payload["model"] == "LogNormal" else None
+    if location_index is None:
+        median_time = float(np.exp(values[labels.index((
+            {"Weibull": "lambda_", "LogLogistic": "alpha_"}[payload["model"]], "Intercept"))]))
+    else:
+        median_time = float(np.exp(values[location_index]))
+    if not np.isfinite(median_time) or median_time <= 0:
+        return variants
+
+    log_tau = tau / median_time
+    scale = float(np.exp(log_scale))
+    for label, signed in (("remove_technical", -1.0), ("double_technical", +1.0)):
+        adjusted = scale ** 2 + signed * log_tau ** 2
+        if adjusted <= 1e-8:
+            # 扣除后非正，说明测序误差的折算量已接近全部离散度；
+            # 此时不构造该情景，避免给出无意义的退化分布。
+            continue
+        new_values = values.copy()
+        new_values[index] = float(np.log(np.sqrt(adjusted)))
+        variants[label] = prob_fn_from_payload(payload, new_values)
+    return variants
 
 
 def mixed_probability(fit_info: dict, events: pd.DataFrame, stats: dict, feature_values: dict,
@@ -670,7 +743,9 @@ def main() -> None:
     stats = standardize(events, subject)
     mixed_name, mixed_fits, mixed_table = fit_mixed_candidates(events, subject)
     aft_name, aft_dist, aft_fit, aft_table, specs, cv_table, calibration_table = fit_aft_candidates(subject)
-    payload = export_aft(aft_name, aft_dist, aft_fit, specs, subject, stats, args.output_dir / "q3_model.npy")
+    technical_time_sd = estimate_technical_time_sd(events)
+    payload = export_aft(aft_name, aft_dist, aft_fit, specs, subject, stats,
+                         args.output_dir / "q3_model.npy", technical_time_sd)
     mixed_fit = mixed_fits[mixed_name]
     write_summary(args, events, subject, mixed_name, mixed_table, aft_name, aft_dist,
                   aft_table, payload, mixed_fit, stats, cv_table, calibration_table)
