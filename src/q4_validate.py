@@ -32,7 +32,9 @@ outputs/q4_repeated_cv.csv       重复分组 CV 的逐重复与汇总指标
 outputs/q4_model_comparison.csv  带噪声判定的模型对比结论
 outputs/q4_threshold_policy.csv  各折阈值、策略与验证折表现
 outputs/q4_sensitivity.csv       QC/口径/特征集/权重稳健性
-outputs/q4_errors.csv            假阴性与假阳性的分层错误分析
+outputs/q4_errors.csv            逐事件错误清单（含多数表决预测）
+outputs/q4_error_strata.csv      按亚型/孕周/BMI/QC/技术重复的分层指标
+outputs/q4_bootstrap_ci.csv      以孕妇为簇的 Bootstrap 95% 置信区间
 
 运行
 ----
@@ -122,10 +124,35 @@ def rule_score(events: pd.DataFrame, kind: str) -> np.ndarray:
     return np.nanmax(np.abs(z), axis=1) if kind == "abs" else np.nanmax(z, axis=1)
 
 
+def fit_tree(train: pd.DataFrame, features: list[str], target: str):
+    """受限非线性对照（分工任务2要求）。
+
+    样本量小（554 事件、66 阳性），故严格限制容量：深度 3、叶子至少 20 个
+    样本，并用 class_weight 平衡。目的是检验"线性 logistic 是否漏掉了明显
+    的非线性或交互"，不是为了追求最优性能；若它不能稳定超过 logistic，
+    就应保留更简单、可解释的线性模型。
+    """
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+
+    pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("forest", RandomForestClassifier(
+            n_estimators=300, max_depth=3, min_samples_leaf=20,
+            class_weight="balanced", random_state=2026, n_jobs=-1)),
+    ])
+    x = train[features].apply(pd.to_numeric, errors="coerce")
+    y = pd.to_numeric(train[target], errors="coerce").fillna(0).astype(int)
+    pipeline.fit(x, y)
+    return pipeline
+
+
 CANDIDATES = (
     [{"name": f"rule_{kind}Z", "kind": "rule", "rule": kind} for kind in ("signed", "abs")]
     + [{"name": f"logit_{name}", "kind": "model", "feature_set": name}
        for name in FEATURE_SETS]
+    + [{"name": "forest_all_depth3", "kind": "tree", "feature_set": "all"}]
 )
 
 
@@ -141,8 +168,32 @@ def folds_for(events: pd.DataFrame, y: np.ndarray, n_splits: int, seed: int):
     raise ValueError("无法构造两类齐全的分组折")
 
 
+def fit_logit_features(train: pd.DataFrame, features: list[str], target: str):
+    """任意特征子集的 logistic（用于"去掉 BMI"这类特征扰动）。
+
+    一号的 FEATURE_SETS 只有 z / z_quality / all 三种固定组合，无法表达
+    "全特征去掉 BMI"，故这里用同样的预处理流水线自建。
+    """
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler()),
+        ("classifier", LogisticRegression(C=1.0, solver="lbfgs", max_iter=5000,
+                                          random_state=2026)),
+    ])
+    x = train[features].apply(pd.to_numeric, errors="coerce")
+    y = pd.to_numeric(train[target], errors="coerce").fillna(0).astype(int)
+    pipeline.fit(x, y)
+    return pipeline
+
+
 def run_once(events: pd.DataFrame, target: str, candidate: dict,
-             n_splits: int, seed: int):
+             n_splits: int, seed: int,
+             minimum_sensitivity: float = TARGET_SENSITIVITY):
     """一次完整的分组 CV，返回 OOF 预测与逐折阈值记录。"""
     y = pd.to_numeric(events[target], errors="coerce").fillna(0).astype(int).to_numpy()
     folds, actual = folds_for(events, y, n_splits, seed)
@@ -152,11 +203,21 @@ def run_once(events: pd.DataFrame, target: str, candidate: dict,
         if candidate["kind"] == "rule":
             train_score = rule_score(train, candidate["rule"])
             score = rule_score(valid, candidate["rule"])
+        elif candidate["kind"] in ("tree", "tree_free_logit"):
+            features = candidate.get("features") or list(FEATURE_SETS[candidate["feature_set"]])
+            builder = fit_tree if candidate["kind"] == "tree" else fit_logit_features
+            estimator = builder(train, features, target)
+            train_score = estimator.predict_proba(
+                train[features].apply(pd.to_numeric, errors="coerce"))[:, 1]
+            score = estimator.predict_proba(
+                valid[features].apply(pd.to_numeric, errors="coerce"))[:, 1]
         else:
-            model = fit_model(train, candidate["feature_set"], target)
+            model = fit_model(train, candidate["feature_set"], target,
+                              C=candidate.get("C", 1.0),
+                              class_weight=candidate.get("class_weight"))
             train_score = predict_proba(model, train)
             score = predict_proba(model, valid)
-        threshold, policy = choose_threshold(y[train_index], train_score)
+        threshold, policy = choose_threshold(y[train_index], train_score, minimum_sensitivity)
         thresholds.append({"model": candidate["name"], "target": target, "seed": seed,
                            "fold": fold, "n_folds": actual, "threshold": threshold,
                            "policy": policy})
@@ -208,6 +269,85 @@ def comparison(per_repeat: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- 稳健性与错误
 
+def cluster_bootstrap(oof: pd.DataFrame, n_boot: int, seed: int = BASE_SEED) -> pd.DataFrame:
+    """以孕妇为簇的 Bootstrap 置信区间（分工任务4）。
+
+    只重抽**评估单位**（整位孕妇连同其全部事件），不用于扩增训练阳性样本；
+    这是量化"换一批孕妇会怎样"的不确定性，不是数据增强。同一孕妇的多个
+    事件必须整体一起进出，否则会低估区间宽度。
+    为避免同一事件被多个重复计入，只用第一个种子的 OOF。
+    """
+    rng = np.random.default_rng(seed)
+    records = []
+    for model, block in oof.groupby("model"):
+        block = block[block.seed == block.seed.min()]
+        by_mother = {m: g for m, g in block.groupby("mother_id")}
+        mothers = np.array(list(by_mother))
+        draws = {k: [] for k in ("pr_auc", "roc_auc", "sensitivity",
+                                 "specificity", "ppv", "f1")}
+        for _ in range(n_boot):
+            picked = rng.choice(mothers, len(mothers), replace=True)
+            sample = pd.concat([by_mother[m] for m in picked], ignore_index=True)
+            if sample.label.nunique() < 2:
+                continue
+            values = metrics(sample.label, sample.score, sample.prediction)
+            for key in draws:
+                draws[key].append(values[key])
+        for key, values in draws.items():
+            array = np.asarray([v for v in values if np.isfinite(v)], float)
+            if not len(array):
+                continue
+            records.append({"model": model, "metric": key, "n_boot": len(array),
+                            "median": float(np.median(array)),
+                            "ci_low": float(np.percentile(array, 2.5)),
+                            "ci_high": float(np.percentile(array, 97.5))})
+    return pd.DataFrame(records)
+
+
+def stratified_errors(errors: pd.DataFrame) -> pd.DataFrame:
+    """错误分析的分层指标表（分工任务6）。
+
+    分工要求按 T13/T18/T21、孕周、BMI、QC 状态和是否技术重复分层检查，
+    因此这里给出每一层的样本量、阳性数、灵敏度与特异度，而不仅是原始
+    错误清单。
+    """
+    frame = errors.copy()
+    layers = []
+    for subtype in SUBTYPES:
+        column = f"label_{subtype}"
+        if column in frame.columns:
+            layers.append((f"亚型_{subtype}", frame[column] == 1))
+    if "week" in frame.columns:
+        cut = pd.qcut(frame.week, 3, duplicates="drop")
+        for level in cut.cat.categories:
+            layers.append((f"孕周_{level}", cut == level))
+    if "bmi" in frame.columns:
+        cut = pd.qcut(frame.bmi, 3, duplicates="drop")
+        for level in cut.cat.categories:
+            layers.append((f"BMI_{level}", cut == level))
+    if "flag_any" in frame.columns:
+        layers.append(("QC正常", frame.flag_any == 0))
+        layers.append(("QC可疑", frame.flag_any == 1))
+    if "is_tech_repeat" in frame.columns:
+        layers.append(("含技术重复", frame.is_tech_repeat == 1))
+        layers.append(("无技术重复", frame.is_tech_repeat == 0))
+    layers.append(("全体", pd.Series(True, index=frame.index)))
+
+    records = []
+    for name, mask in layers:
+        block = frame[mask]
+        if not len(block):
+            continue
+        tp, fp, tn, fn = confusion(block.label, block.prediction)
+        records.append({
+            "stratum": name, "n": len(block), "positive": int(block.label.sum()),
+            "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+            "sensitivity": tp / (tp + fn) if tp + fn else np.nan,
+            "specificity": tn / (tn + fp) if tn + fp else np.nan,
+            "ppv": tp / (tp + fp) if tp + fp else np.nan})
+    return pd.DataFrame(records)
+
+
 def sensitivity_analysis(rows: pd.DataFrame, events: pd.DataFrame,
                          repeats: int, n_splits: int) -> pd.DataFrame:
     """口径与设定扰动下，最优模型的结论是否稳定。"""
@@ -227,27 +367,59 @@ def sensitivity_analysis(rows: pd.DataFrame, events: pd.DataFrame,
         scenarios["first_draw_only"] = first
 
     records = []
+    n_repeat = max(repeats // 2, 2)
+
+    def evaluate(scenario, frame, candidate, minimum_sensitivity=TARGET_SENSITIVITY):
+        values = []
+        for repeat in range(n_repeat):
+            try:
+                oof, _ = run_once(frame.reset_index(drop=True), "label", candidate,
+                                  n_splits, BASE_SEED + repeat,
+                                  minimum_sensitivity=minimum_sensitivity)
+            except Exception:
+                continue
+            values.append(metrics(oof.label, oof.score, oof.prediction))
+        if not values:
+            return
+        table = pd.DataFrame(values)
+        records.append({"scenario": scenario, "model": candidate["name"],
+                        "n_units": len(frame), "n_mothers": frame.mother_id.nunique(),
+                        "pr_auc_mean": table.pr_auc.mean(),
+                        "pr_auc_sd": table.pr_auc.std(),
+                        "roc_auc_mean": table.roc_auc.mean(),
+                        "sensitivity_mean": table.sensitivity.mean(),
+                        "specificity_mean": table.specificity.mean()})
+
+    # 口径类扰动：全部候选都跑
     for name, frame in scenarios.items():
         for candidate in CANDIDATES:
-            values = []
-            for repeat in range(max(repeats // 2, 2)):
-                try:
-                    oof, _ = run_once(frame.reset_index(drop=True), "label", candidate,
-                                      n_splits, BASE_SEED + repeat)
-                except Exception:
-                    continue
-                values.append(metrics(oof.label, oof.score, oof.prediction))
-            if not values:
-                continue
-            table = pd.DataFrame(values)
-            records.append({"scenario": name, "model": candidate["name"],
-                            "n_units": len(frame),
-                            "n_mothers": frame.mother_id.nunique(),
-                            "pr_auc_mean": table.pr_auc.mean(),
-                            "pr_auc_sd": table.pr_auc.std(),
-                            "roc_auc_mean": table.roc_auc.mean(),
-                            "sensitivity_mean": table.sensitivity.mean(),
-                            "specificity_mean": table.specificity.mean()})
+            evaluate(name, frame, candidate)
+
+    # 特征类扰动：去掉 BMI / 去掉全部个体变量，只对全特征模型有意义
+    person = [c for c in ("bmi", "week", "age") if c in events.columns]
+    variants = {
+        "drop_bmi": [f for f in FEATURE_SETS["all"] if f != "bmi"],
+        "drop_person_features": [f for f in FEATURE_SETS["all"] if f not in person],
+        "x_conc_only": ["x_conc"] if "x_conc" in events.columns else None,
+    }
+    for name, features in variants.items():
+        if not features:
+            continue
+        evaluate(name, events,
+                 {"name": f"logit_{name}", "kind": "tree_free_logit", "features": features})
+
+    # 类别权重扰动
+    for weight in (None, "balanced"):
+        evaluate(f"class_weight={weight}", events,
+                 {"name": "logit_all", "kind": "model", "feature_set": "all",
+                  "class_weight": weight})
+
+    # 阈值规则扰动：把漏诊优先的目标灵敏度上下调整
+    for minimum in (0.80, 0.90, 0.95):
+        evaluate(f"target_sensitivity={minimum:.2f}", events,
+                 {"name": "logit_all", "kind": "model", "feature_set": "all"},
+                 minimum_sensitivity=minimum)
+
     return pd.DataFrame(records)
 
 
@@ -279,6 +451,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="问题四：重复分组验证与稳健性（二号）")
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--splits", type=int, default=5)
+    parser.add_argument("--n-boot", type=int, default=600)
     parser.add_argument("--output-dir", type=Path, default=OUT)
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -307,9 +480,18 @@ def main() -> None:
     print(f"\n【阈值策略】{len(fallback)}/{len(thresholds)} 折无法在训练内达到 "
           f"{TARGET_SENSITIVITY:.0%} 灵敏度，已回退到灵敏度最大处并标记，未事后放宽规则")
 
+    boot = cluster_bootstrap(oof, args.n_boot)
+    boot.to_csv(args.output_dir / "q4_bootstrap_ci.csv", index=False, encoding="utf-8-sig")
+    print(f"\n【以孕妇为簇的 Bootstrap】{args.n_boot} 次，整位孕妇连同其全部事件一起重抽")
+    show = boot[boot.metric.isin(["pr_auc", "sensitivity", "ppv"])]
+    print(show.pivot(index="model", columns="metric",
+                     values=["median", "ci_low", "ci_high"]).round(3).to_string())
+
     best_model = summary.iloc[0].model
     errors = error_analysis(events, oof, best_model)
     errors.to_csv(args.output_dir / "q4_errors.csv", index=False, encoding="utf-8-sig")
+    strata = stratified_errors(errors)
+    strata.to_csv(args.output_dir / "q4_error_strata.csv", index=False, encoding="utf-8-sig")
     counts = errors.error_type.value_counts()
     print(f"\n【错误分析】最优模型 {best_model}（多数表决后）")
     print(counts.to_string())
@@ -322,6 +504,9 @@ def main() -> None:
                 missed = int(false_negative[column].sum())
                 if total:
                     print(f"  {subtype}: 漏诊 {missed}/{total}")
+
+    print("\n【错误分层】按亚型/孕周/BMI/QC/技术重复")
+    print(strata.round(3).to_string(index=False))
 
     sensitivity = sensitivity_analysis(rows, events, args.repeats, args.splits)
     sensitivity.to_csv(args.output_dir / "q4_sensitivity.csv", index=False, encoding="utf-8-sig")
