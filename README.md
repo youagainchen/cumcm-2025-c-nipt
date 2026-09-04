@@ -46,9 +46,9 @@ paper/            论文与格式参考
 - 建模脚本：`python src/q1_model.py`（依赖 `data/processed/male_clean.csv`，先跑 `src/clean.py`）。
 - 产物（`outputs/`，不入库）：`q1_out.txt` 完整日志、`q1_coef.npy` 最终模型系数（问题二直接载入）。
 - 建模思路与图表需求：[`docs/建模思路/问题一_建模思路.md`](docs/建模思路/问题一_建模思路.md)。
-- 绘图脚本：`python src/q1_plot.py`，输出6组汇总图到 `figures/q1_v4/`（PNG+PDF）。
+- 绘图脚本：`python src/q1_plot.py`，输出5组必要图到 `figures/q1_v4/`（PNG+PDF）。
 - 当前本地模型：sqrt(Y) 的随机截距+孕周随机斜率混合模型；孕周采用中心化自然样条(df=3)，BMI 拆分为基线(between)与孕期内变化(within)。v4 完整精度已通过（1000/1000次聚类Bootstrap成功）；关联结论稳定，但按孕妇5折CV的原始Y尺度R²为负，不能把高条件R²当成新孕妇预测准确率。
-- 问题一图表由本地 `src/q1_plot.py` 统一复现；图表规格见建模思路文档第13节。
+- 问题一图表由本地 `src/q1_plot.py` 统一复现；图表规格见建模思路文档第9节。
 
 ## 问题二：BMI分组与最佳NIPT时点
 
@@ -57,4 +57,5 @@ paper/            论文与格式参考
 - 连续BMI动态分组：`python src/q2_optimize.py`。
 - 误差传播与敏感性：`python src/q2_sensitivity.py`。
 - 两路径集成和最终方案：`python src/q2_final.py`。
+- 绘图脚本：`python src/q2_plot.py`，输出4组组合图到 `figures/q2_v1/`（PNG+PDF）。
 - 完整说明：[`docs/建模思路/问题二_建模思路.md`](docs/建模思路/问题二_建模思路.md)。

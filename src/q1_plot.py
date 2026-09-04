@@ -3,7 +3,6 @@
 
 数据来源：
   data/processed/male_clean_event.csv  主分析事件级数据
-  outputs/q1_coef.npy                 正式问题二接口
   outputs/q1_out.txt                  完整精度统计结果
 
 输出：figures/q1_v4/*.png 和 *.pdf
@@ -31,13 +30,11 @@ import scipy.stats as st
 import seaborn as sns
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-from scipy.optimize import brentq
 
 
 ROOT = Path(__file__).resolve().parent.parent
 EVENT = ROOT / "data" / "processed" / "male_clean_event.csv"
 ROWLV = ROOT / "data" / "processed" / "male_clean.csv"
-COEF_PATH = ROOT / "outputs" / "q1_coef.npy"
 LOG_PATH = ROOT / "outputs" / "q1_out.txt"
 FIG_DIR = ROOT / "figures" / "q1_v4"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -115,7 +112,7 @@ def save_figure(fig: plt.Figure, stem: str) -> None:
 
 
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    for path in (EVENT, ROWLV, COEF_PATH, LOG_PATH):
+    for path in (EVENT, ROWLV, LOG_PATH):
         if not path.exists():
             raise SystemExit(f"缺少 {path.relative_to(ROOT)}，请先运行 clean.py 和 q1_model.py")
     d = pd.read_csv(EVENT, encoding="utf-8-sig").rename(
@@ -469,116 +466,20 @@ def cluster_boot_corr(d: pd.DataFrame, x: str, B: int = 1000) -> np.ndarray:
     return out
 
 
-def load_coef() -> dict:
-    coef = np.load(COEF_PATH, allow_pickle=True).item()
-    required = {"week_grid", "week_effect_grid", "week_min", "week_max", "b3", "b4",
-                "mu_w", "mu_bb", "s2u0", "s2u1", "cov01", "s2e", "g0", "g1", "g_var"}
-    missing = required.difference(coef)
-    if missing:
-        raise RuntimeError(f"q1_coef.npy 缺少字段: {sorted(missing)}")
-    if not coef.get("converged", False):
-        raise RuntimeError("q1_coef.npy 标记为未收敛，拒绝画预测图。")
-    return coef
-
-
-def mean_resp(week, bmi_baseline, C):
-    week = np.asarray(week, float)
-    bmi_baseline = np.asarray(bmi_baseline, float)
-    eff = np.interp(week, C["week_grid"], C["week_effect_grid"], left=np.nan, right=np.nan)
-    wc = week - C["mu_w"]
-    within = C["g0"] + C["g1"] * wc
-    return eff + C["b3"] * (bmi_baseline - C["mu_bb"]) + C["b4"] * within
-
-
-def var_resp(week, C):
-    wc = np.asarray(week, float) - C["mu_w"]
-    return (C["s2u0"] + 2 * C["cov01"] * wc + C["s2u1"] * wc**2
-            + C["s2e"] + C["b4"] ** 2 * C["g_var"])
-
-
-def probability(week, bmi, C):
-    mu = mean_resp(week, bmi, C)
-    return st.norm.sf((np.sqrt(0.04) - mu) / np.sqrt(var_resp(week, C)))
-
-
-def earliest_week(bmi: float, p: float, C) -> float:
-    scan = np.asarray(C["week_grid"], float)
-    vals = probability(scan, bmi, C) - p
-    if vals[0] >= 0:
-        return float(scan[0])
-    crossing = np.where((vals[:-1] < 0) & (vals[1:] >= 0))[0]
-    if not len(crossing):
-        return np.nan
-    i = int(crossing[0])
-    return brentq(lambda w: float(probability(w, bmi, C) - p), scan[i], scan[i + 1])
-
-
-def plot_decision_interface(C) -> None:
-    """合并达标概率曲面和最早达标孕周，作为问题二接口。"""
-    week = np.linspace(C["week_min"], C["week_max"], 361)
-    bmi = np.linspace(20.7, 46.9, 270)
-    W, B = np.meshgrid(week, bmi)
-    P = probability(W, B, C)
-    fig, axes = plt.subplots(1, 2, figsize=(15.5, 6.2))
-    ax = axes[0]
-    levels = np.linspace(0, 1, 21)
-    cf = ax.contourf(W, B, P, levels=levels, cmap="viridis", extend="both")
-    cs = ax.contour(W, B, P, levels=[0.5, 0.8, 0.9, 0.95], colors="white", linewidths=1.4)
-    ax.clabel(cs, fmt=lambda x: f"P={x:.2f}", inline=True, fontsize=8)
-    ax.axvspan(25, 29, color="white", alpha=0.18)
-    ax.text(27, 45.5, "稀疏区", color="white", ha="center", fontweight="bold")
-    cbar = fig.colorbar(cf, ax=ax, pad=0.02)
-    cbar.set_label("P(Y≥4%)")
-    ax.set(xlim=(11, 29), xlabel="孕周（周）", ylabel="基线BMI",
-           title="A. Y染色体浓度达到4%的模型概率")
-
-    ax = axes[1]
-    bmi = np.linspace(20.7, 46.9, 160)
-    probs = [0.50, 0.80, 0.90, 0.95]
-    colors = ["#009e73", "#56b4e9", "#e69f00", "#d55e00"]
-    for p, color in zip(probs, colors):
-        reach = np.array([earliest_week(x, p, C) for x in bmi])
-        at_lower = np.isfinite(reach) & (reach <= C["week_min"] + 1e-8)
-        regular = np.isfinite(reach) & ~at_lower
-        ax.plot(bmi[regular], reach[regular], color=color, lw=2.2, label=f"目标概率 {p:.2f}")
-        # 11周下界可能覆盖一整段BMI；稀疏标点即可表达截断，避免密集圆圈糊成色带。
-        lower_bmi = bmi[at_lower][::12]
-        lower_reach = reach[at_lower][::12]
-        ax.scatter(lower_bmi, lower_reach, facecolors="none", edgecolors=color,
-                   s=22, linewidths=0.9)
-    ax.axhspan(25, 29, color="#777777", alpha=0.12, label="25周后稀疏区")
-    ax.axhline(11, color="#444444", ls=":", lw=1)
-    ax.text(46.6, 11.15, "空心点：触及11周观测下界", ha="right", fontsize=8)
-    ax.set(xlim=(20.7, 46.9), ylim=(10.7, 29.2), xlabel="基线BMI",
-           ylabel="域内最早达标孕周", title="B. 不同把握度下的最早达标孕周")
-    ax.legend(frameon=False, ncol=2)
-    fig.suptitle("达标概率与最早达标孕周", fontsize=15, fontweight="bold")
-    fig.text(0.5, 0.01, "概率尚未经过独立外部校准，仅用于相对时点比较；25周后数据稀疏。",
-             ha="center", fontsize=9)
-    fig.tight_layout(rect=(0, 0.04, 1, 0.95))
-    fig.savefig(FIG_DIR / "q1_06_decision_interface.png", bbox_inches="tight", facecolor="white")
-    fig.savefig(FIG_DIR / "q1_06_decision_interface.pdf", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    print("saved figures/q1_v4/q1_06_decision_interface.(png|pdf)")
-
-
 def main() -> None:
     setup_style()
-    # 目录仅保留最终模型的六张汇总图。
+    # 目录仅保留最终模型的五张必要图；决策图归入问题二。
     for pattern in ("*.png", "*.pdf"):
         for old in FIG_DIR.glob(pattern):
             old.unlink()
     d, _ = load_data()
     final = fit_final(d)
     check_official(final, d)
-    coef = load_coef()
-
     plot_data_correlation(d.copy())
     plot_final_nonlinear_model(d, final)
     plot_model_evidence()
     plot_diagnostics(d, final)
     plot_grouped_cv(d)
-    plot_decision_interface(coef)
     print(f"完成：共生成 {len(list(FIG_DIR.glob('*.png')))} 张PNG和"
           f" {len(list(FIG_DIR.glob('*.pdf')))} 张PDF。")
 
