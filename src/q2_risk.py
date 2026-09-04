@@ -46,6 +46,7 @@ q2_risk.py —— 甲：问题二的风险函数与期望风险机制（乙的�
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -101,6 +102,9 @@ class ExpectedRisk:
     def __init__(self, coef=None, prob_fn=None, params: RiskParams = None):
         self.params = params or RiskParams()
         self.prob_fn = prob_fn
+        self._prob_supports_prev = (
+            prob_fn is not None and "prev_week" in inspect.signature(prob_fn).parameters
+        )
         if prob_fn is None:
             if coef is None:
                 if not COEF_PATH.exists():
@@ -126,8 +130,11 @@ class ExpectedRisk:
         p = st.norm.sf((np.sqrt(thr) - mu) / np.sqrt(var))
         return np.where(out, np.nan, p)
 
-    def prob_qualified(self, week, bmi_baseline, thr=0.04):
+    def prob_qualified(self, week, bmi_baseline, thr=0.04, prev_week=None):
         if self.prob_fn is not None:
+            if self._prob_supports_prev:
+                return self.prob_fn(week, bmi_baseline, thr, prev_week=prev_week)
+            # 兼容只实现原三参数签名的外部概率接口。
             return self.prob_fn(week, bmi_baseline, thr)
         return self._prob_q1(week, bmi_baseline, thr)
 
@@ -157,7 +164,10 @@ class ExpectedRisk:
             tk = t + k * p.retest_gap
             if tk > p.horizon:
                 break
-            pk = float(np.atleast_1d(self.prob_qualified(tk, bmi_baseline))[0])
+            prev = None if k == 0 else tk - p.retest_gap
+            pk = float(np.atleast_1d(
+                self.prob_qualified(tk, bmi_baseline, thr, prev_week=prev)
+            )[0])
             if not np.isfinite(pk):
                 break
             total += reach * pk * float(risk_curve(tk, p))          # 本轮成功
