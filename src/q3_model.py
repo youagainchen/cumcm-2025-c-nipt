@@ -447,7 +447,7 @@ def grouped_aft_cv(subject: pd.DataFrame, specs: dict[str, list[str]], folds: in
     from lifelines import LogLogisticAFTFitter, LogNormalAFTFitter, WeibullAFTFitter
 
     if len(subject) < folds:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
     rng = np.random.default_rng(seed)
     ids = subject["mother_id"].to_numpy()
     shuffled = rng.permutation(ids)
@@ -473,6 +473,9 @@ def grouped_aft_cv(subject: pd.DataFrame, specs: dict[str, list[str]], folds: in
             column + "_z": (train_raw[column] - fold_stats[column][0]) / fold_stats[column][1]
             for column in FEATURES
         }, index=train_raw.index)
+        # 训练与验证必须使用完全相同的正式协变量列；否则 lifelines 会把
+        # 额外的 bmi_z 当作训练特征，预测时因验证集缺列而整折失败。
+        train = train[features].copy()
         train["lo"] = lower[~validation_mask]
         train["hi"] = upper[~validation_mask]
         validation_raw = subject.loc[validation_mask, list(FEATURES)].copy()

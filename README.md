@@ -68,4 +68,5 @@ paper/            论文与格式参考
 - 敏感性分析：`python src/q3_sensitivity.py --parameter-draws 100 --seed 2026`，重新优化风险梯度、失联率、复检间隔、概率模型变体及AFT参数协方差抽样。
 - 正式CSV结果位于`outputs/q3_*.csv`，其中边界稳定性汇总为`q3_boundary_stability.csv`。
 - 一号接口未提交前可用 `--mock` 联调；联调结果只写入 `outputs/q3_mock_*`，不得作为正式结论。
-- 优化部分说明：[`docs/建模思路/问题三_优化部分.md`](docs/建模思路/问题三_优化部分.md)。
+- 完整建模思路：[`docs/建模思路/问题三_建模思路.md`](docs/建模思路/问题三_建模思路.md)；模型与优化细节分别保留在对应分工文档中。
+- 绘图脚本：`python src/q3_plot.py`，输出5组必要组合图至`figures/q3_v1/`（PNG+PDF）。
