@@ -46,7 +46,7 @@ def save(fig, stem: str) -> None:
 
 
 def check_inputs() -> None:
-    required = ["q2_survival.npy", "q2_final_k_curve.csv", "q2_boundary_profile.csv",
+    required = ["q2_survival.npy", "q2_final_k_curve.csv", "q2_final_groups.csv",
                 "q2_sensitivity.csv", "q2_uncertainty_summary.csv"]
     missing = [name for name in required if not (OUT / name).exists()]
     if missing:
@@ -98,41 +98,44 @@ def plot_risk_mechanism() -> None:
 
 def plot_optimization() -> None:
     summary = pd.read_csv(OUT / "q2_final_k_curve.csv", encoding="utf-8-sig")
-    summary = summary[np.isclose(summary.survival_weight, 0.5)]
-    profile = pd.read_csv(OUT / "q2_boundary_profile.csv", encoding="utf-8-sig")
+    final_groups = pd.read_csv(OUT / "q2_final_groups.csv", encoding="utf-8-sig")
     data = pd.read_csv(EVENT, encoding="utf-8-sig").sort_values(["mother_id", "week_mean"])
     bmi = data.groupby("mother_id").bmi.first()
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 5.2))
     axes[0].plot(summary.k, summary.relative_reduction * 100, marker="o",
                  lw=2.5, color="#1f4e79")
-    axes[0].axvline(2, color="#b2182b", ls="--", label="采用 k=2")
+    axes[0].axvline(4, color="#b2182b", ls="--", label="采用 k=4")
     axes[0].set(xlabel="组数 k", ylabel="相对不分组风险降幅（%）",
                 title="A. 最终模型的组数收益")
     axes[0].legend(frameon=False)
 
-    axes[1].plot(profile.cut, profile.avg_risk, color="#4c78a8", lw=2)
-    near = profile[profile.within_0p1pct]
-    axes[1].axvspan(near.cut.min(), near.cut.max(), color="#4c78a8", alpha=0.16,
-                    label="距最优≤0.1%")
-    axes[1].axvline(32, color="#b2182b", ls="--", label="采用BMI=32")
-    axes[1].set(xlabel="两组切点BMI", ylabel="最终模型平均风险",
-                title="B. BMI边界风险剖面")
-    axes[1].legend(frameon=False)
+    bars = axes[1].bar(final_groups.group.astype(str), final_groups.best_week,
+                       color=sns.color_palette("Blues", 5)[1:])
+    for bar, row in zip(bars, final_groups.itertuples()):
+        axes[1].text(bar.get_x() + bar.get_width() / 2, row.best_week + 0.15,
+                     f"{row.best_week:.2f}周\nn={row.n}", ha="center", fontsize=8)
+    axes[1].set(xlabel="BMI组", ylabel="推荐检测孕周",
+                title="B. 四组最佳检测时点", ylim=(0, 20))
 
     bins = np.linspace(bmi.min(), bmi.max(), 22)
-    axes[2].hist(bmi[bmi < 32], bins=bins, color="#4c78a8", alpha=0.8,
-                 label="组1 n=152")
-    axes[2].hist(bmi[bmi >= 32], bins=bins, color="#e69f00", alpha=0.8,
-                 label="组2 n=115")
-    axes[2].axvline(32, color="#b2182b", ls="--")
+    colors = ["#4c78a8", "#72a0c1", "#e69f00", "#b2182b"]
+    for row, color in zip(final_groups.itertuples(), colors):
+        if row.group < len(final_groups):
+            subset = bmi[(bmi >= row.lower) & (bmi < row.upper)]
+        else:
+            subset = bmi[(bmi >= row.lower) & (bmi <= row.upper)]
+        axes[2].hist(subset, bins=bins, color=color, alpha=0.8,
+                     label=f"组{row.group} n={row.n}")
+    for cut in (30, 32, 37):
+        axes[2].axvline(cut, color="#333333", ls="--", lw=1)
     axes[2].set(xlabel="基线BMI", ylabel="孕妇数", title="C. 最终可执行分组")
     axes[2].legend(frameon=False)
 
     fig.suptitle("最终BMI分组：组数、边界与检测时点",
                  fontsize=15, fontweight="bold")
     fig.text(0.5, 0.01,
-             "最终方案：[20.70,32)于12.45周检测；[32,46.88]于14.25周检测。",
+             "最终采用4组，整数BMI边界为30、32和37；各组时点由集成期望风险最小化得到。",
              ha="center", fontsize=9)
     fig.tight_layout(rect=(0, 0.04, 1, 0.95))
     save(fig, "q2_02_group_optimization")
@@ -141,14 +144,14 @@ def plot_optimization() -> None:
 def plot_uncertainty() -> None:
     sensitivity = pd.read_csv(OUT / "q2_sensitivity.csv", encoding="utf-8-sig")
     uncertainty = pd.read_csv(OUT / "q2_uncertainty_summary.csv", encoding="utf-8-sig")
-    high = sensitivity[sensitivity.group == 2].copy()
+    high = sensitivity[sensitivity.group == 4].copy()
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
     y = np.arange(len(high))[::-1]
     axes[0].scatter(high.best_week, y, color="#4c78a8", s=50)
-    axes[0].axvline(14.6, color="#b2182b", ls="--", label="正式设定14.6周")
+    axes[0].axvline(17.9, color="#b2182b", ls="--", label="正式设定17.9周")
     axes[0].set_yticks(y, high.scenario)
-    axes[0].set(xlabel="高BMI组最佳孕周", title="A. 风险参数与检测误差敏感性")
+    axes[0].set(xlabel="第4组最佳孕周", title="A. 风险参数与检测误差敏感性")
     axes[0].legend(frameon=False, fontsize=8)
 
     selected = uncertainty[uncertainty.quantity.isin(["t80", "t90"])].copy()

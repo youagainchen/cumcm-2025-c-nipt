@@ -11,6 +11,7 @@ import scipy.stats as st
 
 from q2_optimize import load_baseline_bmi, optimize_all_k, risk_matrix
 from q2_risk import ExpectedRisk, RiskParams
+from q2_survival import load_prob_fn
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,15 +20,20 @@ COEF = OUT / "q1_coef.npy"
 SURV = OUT / "q2_survival.npy"
 
 
-def k2_result(label: str, er: ExpectedRisk, grid_step: float = 0.10) -> list[dict]:
+def k4_result(label: str, instant: ExpectedRisk, censored: ExpectedRisk,
+              grid_step: float = 0.10) -> list[dict]:
     bmi = load_baseline_bmi().bmi.to_numpy(float)
-    times, values = risk_matrix(er, bmi, grid_step)
+    times, values_instant = risk_matrix(instant, bmi, grid_step)
+    times_censored, values_censored = risk_matrix(censored, bmi, grid_step)
+    if not np.allclose(times, times_censored):
+        raise RuntimeError("两个风险输入组件的候选检测时点网格不一致。")
+    values = 0.5 * (values_instant + values_censored)
     summary, groups = optimize_all_k(
-        bmi, times, values, max_k=2, min_group_size=15
+        bmi, times, values, max_k=4, min_group_size=15
     )
-    s = summary.loc[summary.k == 2].iloc[0]
+    s = summary.loc[summary.k == 4].iloc[0]
     out = []
-    for row in groups[groups.k == 2].itertuples():
+    for row in groups[groups.k == 4].itertuples():
         out.append(dict(
             scenario=label, group=row.group, lower=row.lower, upper=row.upper,
             n=row.n, best_week=row.best_week, group_risk=row.avg_risk,
@@ -38,30 +44,41 @@ def k2_result(label: str, er: ExpectedRisk, grid_step: float = 0.10) -> list[dic
 
 def risk_and_measurement_sensitivity() -> pd.DataFrame:
     base = RiskParams()
-    scenarios: list[tuple[str, ExpectedRisk]] = [
-        ("风险梯度低(r_mid=2)", ExpectedRisk(params=replace(base, r_mid=2.0))),
-        ("主设定", ExpectedRisk(params=base)),
-        ("风险梯度高(r_mid=5)", ExpectedRisk(params=replace(base, r_mid=5.0))),
-        ("低失联(q=0.05)", ExpectedRisk(params=replace(base, q_dropout=0.05))),
-        ("高失联(q=0.15)", ExpectedRisk(params=replace(base, q_dropout=0.15))),
-        ("短复检间隔(3.14周)", ExpectedRisk(params=replace(base, retest_gap=3.14))),
-        ("长复检间隔(4.14周)", ExpectedRisk(params=replace(base, retest_gap=4.14))),
+    parameter_scenarios: list[tuple[str, RiskParams]] = [
+        ("风险梯度低(r_mid=2)", replace(base, r_mid=2.0)),
+        ("正式设定", base),
+        ("风险梯度高(r_mid=5)", replace(base, r_mid=5.0)),
+        ("低失联(q=0.05)", replace(base, q_dropout=0.05)),
+        ("高失联(q=0.15)", replace(base, q_dropout=0.15)),
+        ("短复检间隔(3.14周)", replace(base, retest_gap=3.14)),
+        ("长复检间隔(4.14周)", replace(base, retest_gap=4.14)),
     ]
+
+    aft_prob = load_prob_fn()
+    rows = []
+    for label, params in parameter_scenarios:
+        print(f"敏感性场景：{label}")
+        rows.extend(k4_result(
+            label,
+            ExpectedRisk(params=params),
+            ExpectedRisk(prob_fn=aft_prob, params=params),
+        ))
 
     coef = np.load(COEF, allow_pickle=True).item()
     latent = dict(coef)
     latent["s2e"] = max(coef["s2e"] - coef["s2_tech"], 1e-9)
     elevated = dict(coef)
     elevated["s2e"] = coef["s2e"] + coef["s2_tech"]
-    scenarios.extend([
-        ("去除测序内误差(潜在值)", ExpectedRisk(coef=latent, params=base)),
-        ("测序内方差加倍", ExpectedRisk(coef=elevated, params=base)),
-    ])
-
-    rows = []
-    for label, er in scenarios:
+    for label, coef_variant in [
+        ("去除测序内误差(潜在值)", latent),
+        ("测序内方差加倍", elevated),
+    ]:
         print(f"敏感性场景：{label}")
-        rows.extend(k2_result(label, er))
+        rows.extend(k4_result(
+            label,
+            ExpectedRisk(coef=coef_variant, params=base),
+            ExpectedRisk(prob_fn=aft_prob, params=base),
+        ))
     return pd.DataFrame(rows)
 
 
@@ -88,10 +105,12 @@ def aft_parameter_uncertainty(draws: int = 1000, seed: int = 2025) -> tuple[pd.D
         _nearest_psd(np.asarray(s["param_cov"], float)), size=draws,
     )
     mothers = load_baseline_bmi()
-    groups_all = pd.read_csv(OUT / "q2_groups_all_k.csv", encoding="utf-8-sig")
-    plan = groups_all[(groups_all.path == "survival_aft") & (groups_all.k == 2)].copy()
-    if len(plan) != 2:
-        raise RuntimeError("未找到生存模型k=2方案，请先运行 q2_optimize.py。")
+    plan_path = OUT / "q2_final_groups.csv"
+    if not plan_path.exists():
+        raise RuntimeError("未找到最终4组方案，请先运行 q2_final.py。")
+    plan = pd.read_csv(plan_path, encoding="utf-8-sig")
+    if len(plan) != 4:
+        raise RuntimeError("q2_final_groups.csv 不是4组方案。")
 
     b_ref = [30.0, 35.0, 40.0]
     draw_rows, risk_rows = [], []
@@ -121,14 +140,19 @@ def aft_parameter_uncertainty(draws: int = 1000, seed: int = 2025) -> tuple[pd.D
             prev = st.norm.cdf((np.log(np.maximum(prev_week, 1e-9)) - mu) / sigma)
             return np.clip((now - prev) / np.maximum(1 - prev, 1e-12), 0, 1)
 
-        er = ExpectedRisk(prob_fn=prob_fn, params=params)
+        instant = ExpectedRisk(params=params)
+        censored = ExpectedRisk(prob_fn=prob_fn, params=params)
         total, count = 0.0, 0
         for row in plan.itertuples():
-            if row.group == 1:
-                subset = mothers[mothers.bmi < row.upper]
+            if row.group < len(plan):
+                subset = mothers[(mothers.bmi >= row.lower) & (mothers.bmi < row.upper)]
             else:
-                subset = mothers[mothers.bmi >= row.lower]
-            total += sum(er.expected_risk(row.best_week, b) for b in subset.bmi)
+                subset = mothers[(mothers.bmi >= row.lower) & (mothers.bmi <= row.upper)]
+            total += sum(
+                0.5 * instant.expected_risk(row.best_week, b)
+                + 0.5 * censored.expected_risk(row.best_week, b)
+                for b in subset.bmi
+            )
             count += len(subset)
         risk_rows.append(dict(draw=draw_id, plan_avg_risk=total / count))
 

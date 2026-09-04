@@ -57,5 +57,6 @@ paper/            论文与格式参考
 - 连续BMI动态分组：`python src/q2_optimize.py`。
 - 误差传播与敏感性：`python src/q2_sensitivity.py`。
 - 最终集成风险模型和可执行方案：`python src/q2_final.py`。
+- 正式方案采用4个连续BMI组，整数边界为30、32和37。
 - 绘图脚本：`python src/q2_plot.py`，输出3组最终模型图到 `figures/q2_v1/`（PNG+PDF）。
 - 完整说明：[`docs/建模思路/问题二_建模思路.md`](docs/建模思路/问题二_建模思路.md)。
