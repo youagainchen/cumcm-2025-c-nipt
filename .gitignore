@@ -24,6 +24,8 @@ outputs/*
 !outputs/.gitkeep
 figures/*
 !figures/.gitkeep
+!figures/q1_v4/
+!figures/q1_v4/**
 data/processed/*
 !data/processed/.gitkeep
 
