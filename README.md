@@ -50,12 +50,8 @@ paper/            论文与格式参考
 - 当前本地模型：sqrt(Y) 的随机截距+孕周随机斜率混合模型；孕周采用中心化自然样条(df=3)，BMI 拆分为基线(between)与孕期内变化(within)。v4 完整精度已通过（1000/1000次聚类Bootstrap成功）；关联结论稳定，但按孕妇5折CV的原始Y尺度R²为负，不能把高条件R²当成新孕妇预测准确率。
 - 问题一图表由本地 `src/q1_plot.py` 统一复现；图表规格见建模思路文档第13节。
 
-## 问题二：BMI分组与最佳NIPT时点
+## 问题二（甲侧进行中）
 
 - 风险与复检机制：`python src/q2_risk.py`。
 - 区间删失AFT：`python src/q2_survival.py`。
-- 连续BMI动态分组：`python src/q2_optimize.py`。
-- 误差传播与敏感性：`python src/q2_sensitivity.py`。
-- 两路径集成和最终方案：`python src/q2_final.py`。
-- 四张问题二组合图：`python src/q2_plot.py`，输出到 `figures/q2_v1/`。
-- 完整说明：[`docs/建模思路/问题二_建模思路.md`](docs/建模思路/问题二_建模思路.md)。
+- BMI动态分组、k扫描和风险参数敏感性属于乙的任务，待乙提交后再汇总定稿。
