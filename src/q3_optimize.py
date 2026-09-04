@@ -322,19 +322,44 @@ def assign_instances(
     return assigned
 
 
-def compare_with_q2(q3_groups: pd.DataFrame) -> pd.DataFrame:
+def compare_with_q2(
+    people: pd.DataFrame,
+    times: np.ndarray,
+    risks: np.ndarray,
+    q3_groups: pd.DataFrame,
+) -> pd.DataFrame:
+    """在同一套问题三个体风险下公平比较问题二与问题三方案。"""
     q2_path = OUT / "q2_final_groups.csv"
     q3 = q3_groups[[
         "group", "interval", "n", "best_week", "avg_risk", "total_avg_risk"
     ]].copy()
     q3.insert(0, "model", "q3_multifactor")
+    q3.insert(1, "metric_basis", "q3_multifactor_expected_risk")
     if not q2_path.exists():
         return q3
-    q2 = pd.read_csv(q2_path, encoding="utf-8-sig")
-    q2 = q2[[
-        "group", "interval", "n", "best_week", "avg_risk", "total_avg_risk"
-    ]].copy()
-    q2.insert(0, "model", "q2_official")
+    q2_plan = pd.read_csv(q2_path, encoding="utf-8-sig").sort_values("group")
+    bmi = people.bmi.to_numpy(float)
+    rows = []
+    total = 0.0
+    for row in q2_plan.itertuples():
+        if row.group < len(q2_plan):
+            mask = (bmi >= row.lower) & (bmi < row.upper)
+        else:
+            mask = (bmi >= row.lower) & (bmi <= row.upper)
+        idx = int(np.argmin(np.abs(times - float(row.best_week))))
+        group_total = float(risks[mask, idx].sum())
+        total += group_total
+        rows.append({
+            "model": "q2_official_fixed",
+            "metric_basis": "q3_multifactor_expected_risk",
+            "group": int(row.group),
+            "interval": row.interval,
+            "n": int(mask.sum()),
+            "best_week": float(row.best_week),
+            "avg_risk": group_total / int(mask.sum()),
+        })
+    q2 = pd.DataFrame(rows)
+    q2["total_avg_risk"] = total / len(people)
     return pd.concat([q2, q3], ignore_index=True)
 
 
@@ -373,7 +398,7 @@ def run(
         people, times, risks, k_star, exact_avg
     )
     instances = assign_instances(people, groups, prob_fn, params)
-    comparison = compare_with_q2(groups)
+    comparison = compare_with_q2(people, times, risks, groups)
     validate_outputs(people, summary, groups, instances)
 
     prefix = "q3_mock" if mock else "q3"
