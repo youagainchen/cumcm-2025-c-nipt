@@ -21,6 +21,7 @@ import pandas as pd
 import scipy.stats as st
 from scipy.special import expit
 from patsy import build_design_matrices, dmatrix
+from sklearn.metrics import brier_score_loss, roc_auc_score
 from statsmodels.regression.mixed_linear_model import MixedLM
 
 
@@ -73,6 +74,13 @@ def load_events(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     subject = (events.sort_values(["mother_id", "week"])
                .groupby("mother_id", as_index=False)
                .first()[["mother_id", "bmi", "age", "height", "weight"]])
+    first_observation = (events.sort_values(["mother_id", "week"])
+                         .groupby("mother_id", as_index=False).first()
+                         [["mother_id", "week", "y_conc"]]
+                         .rename(columns={"week": "first_week"}))
+    first_observation["first_attained"] = first_observation["y_conc"] >= 0.04
+    subject = subject.merge(first_observation[["mother_id", "first_week", "first_attained"]],
+                            on="mother_id", how="left")
     if {"t_left", "t_right", "censored"}.issubset(data.columns):
         marks = (data.sort_values(["mother_id", "week"])
                  .groupby("mother_id", as_index=False)
@@ -152,6 +160,8 @@ def mixed_is_valid(model: object, result: object) -> bool:
         random_covariance = np.asarray(result.cov_re, float)
         if not np.all(np.isfinite(covariance)) or not np.all(np.isfinite(random_covariance)):
             return False
+        if np.min(np.linalg.eigvalsh((covariance + covariance.T) / 2)) < -1e-8:
+            return False
         if np.min(np.linalg.eigvalsh((random_covariance + random_covariance.T) / 2)) < -1e-10:
             return False
         if not np.isfinite(float(result.scale)) or float(result.scale) <= 0:
@@ -205,7 +215,7 @@ def bounds_for_aft(subject: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     return lower, upper
 
 
-def fit_aft_candidates(subject: pd.DataFrame) -> tuple[str, str, object, pd.DataFrame, dict]:
+def fit_aft_candidates(subject: pd.DataFrame) -> tuple[str, str, object, pd.DataFrame, dict, pd.DataFrame, pd.DataFrame]:
     from lifelines import LogLogisticAFTFitter, LogNormalAFTFitter, WeibullAFTFitter
 
     lower, upper = bounds_for_aft(subject)
@@ -243,11 +253,19 @@ def fit_aft_candidates(subject: pd.DataFrame) -> tuple[str, str, object, pd.Data
     weights = np.where(np.isfinite(table["delta_aic"]),
                        np.exp(-0.5 * table["delta_aic"]), 0.0)
     table["akaike_weight"] = weights / weights.sum()
+    cv_table, calibration_table = grouped_aft_cv(subject, specs)
     multifactor = valid[valid["feature_model"] == "all_factors"]
-    chosen = (multifactor.sort_values("aic").iloc[0]
-              if not multifactor.empty else valid.sort_values("aic").iloc[0])
+    cv_scores = (cv_table[cv_table["valid"]]
+                 .groupby("distribution", as_index=False)["mean_log_likelihood"].mean()
+                 .sort_values("mean_log_likelihood", ascending=False))
+    if not multifactor.empty and not cv_scores.empty:
+        selected_distribution = str(cv_scores.iloc[0]["distribution"])
+        chosen = multifactor[multifactor["distribution"] == selected_distribution].iloc[0]
+    else:
+        chosen = (multifactor.sort_values("aic").iloc[0]
+                  if not multifactor.empty else valid.sort_values("aic").iloc[0])
     key = (str(chosen.feature_model), str(chosen.distribution))
-    return key[0], key[1], fits[key], table, specs
+    return key[0], key[1], fits[key], table, specs, cv_table, calibration_table
 
 
 def aft_is_valid(fit: object) -> bool:
@@ -308,8 +326,10 @@ def aft_location(payload: dict, bmi, height, weight, age) -> tuple[np.ndarray, f
     return location, shape
 
 
-def load_prob_fn(path: Path = MODEL_PATH):
-    payload = np.load(path, allow_pickle=True).item()
+def prob_fn_from_payload(payload: dict, param_values=None):
+    payload = dict(payload)
+    if param_values is not None:
+        payload["param_values"] = np.asarray(param_values, float)
     model = payload["model"]
 
     def cdf(week, bmi_baseline, height, weight, age):
@@ -332,6 +352,11 @@ def load_prob_fn(path: Path = MODEL_PATH):
         return np.clip((now - previous) / np.maximum(1 - previous, 1e-12), 0, 1)
 
     return prob_qualified
+
+
+def load_prob_fn(path: Path = MODEL_PATH):
+    payload = np.load(path, allow_pickle=True).item()
+    return prob_fn_from_payload(payload)
 
 
 def mixed_probability(fit_info: dict, events: pd.DataFrame, stats: dict, feature_values: dict,
@@ -404,8 +429,8 @@ def parameter_uncertainty(payload: dict, draws: int, subject: pd.DataFrame | Non
 
 
 def grouped_aft_cv(subject: pd.DataFrame, specs: dict[str, list[str]], folds: int = 5,
-                   seed: int = 2026) -> pd.DataFrame:
-    from lifelines import LogNormalAFTFitter
+                   seed: int = 2026) -> tuple[pd.DataFrame, pd.DataFrame]:
+    from lifelines import LogLogisticAFTFitter, LogNormalAFTFitter, WeibullAFTFitter
 
     if len(subject) < folds:
         return pd.DataFrame()
@@ -413,51 +438,115 @@ def grouped_aft_cv(subject: pd.DataFrame, specs: dict[str, list[str]], folds: in
     ids = subject["mother_id"].to_numpy()
     shuffled = rng.permutation(ids)
     rows = []
+    calibration_rows = []
     lower, upper = bounds_for_aft(subject)
     features = specs["all_factors"]
+    distributions = {
+        "Weibull": WeibullAFTFitter,
+        "LogNormal": LogNormalAFTFitter,
+        "LogLogistic": LogLogisticAFTFitter,
+    }
     for fold, validation_ids in enumerate(np.array_split(shuffled, folds), start=1):
         validation_mask = subject["mother_id"].isin(validation_ids).to_numpy()
-        train = subject.loc[~validation_mask, features].copy()
+        train_raw = subject.loc[~validation_mask, list(FEATURES)].copy()
+        fold_stats = {
+            column: (float(train_raw[column].mean()), float(train_raw[column].std(ddof=0)))
+            for column in FEATURES
+        }
+        if any(not np.isfinite(scale) or scale <= 0 for _, scale in fold_stats.values()):
+            raise RuntimeError(f"第{fold}折训练集协变量没有有效变异")
+        train = pd.DataFrame({
+            column + "_z": (train_raw[column] - fold_stats[column][0]) / fold_stats[column][1]
+            for column in FEATURES
+        }, index=train_raw.index)
         train["lo"] = lower[~validation_mask]
         train["hi"] = upper[~validation_mask]
-        validation = subject.loc[validation_mask, features].copy()
+        validation_raw = subject.loc[validation_mask, list(FEATURES)].copy()
+        validation = pd.DataFrame({
+            column + "_z": (validation_raw[column] - fold_stats[column][0]) / fold_stats[column][1]
+            for column in FEATURES
+        }, index=validation_raw.index)
+        validation["first_week"] = subject.loc[validation_mask, "first_week"].to_numpy(float)
+        validation["first_attained"] = subject.loc[validation_mask, "first_attained"].to_numpy(bool)
         validation_lower = lower[validation_mask]
         validation_upper = upper[validation_mask]
-        try:
-            fit = LogNormalAFTFitter().fit_interval_censoring(
-                train, lower_bound_col="lo", upper_bound_col="hi", show_progress=False
-            )
-            log_likelihood = 0.0
-            for row, lo, hi in zip(validation[features].to_dict("records"),
-                                   validation_lower, validation_upper):
-                frame = pd.DataFrame([row])
-                if np.isfinite(lo):
-                    survival_lo = float(fit.predict_survival_function(frame, times=[lo]).iloc[0, 0])
-                else:
-                    survival_lo = 0.0
-                if np.isfinite(hi):
-                    survival_hi = float(fit.predict_survival_function(frame, times=[hi]).iloc[0, 0])
-                else:
-                    survival_hi = 0.0
-                probability = (1 - survival_hi) if lo <= 1e-5 else (
-                    survival_lo - survival_hi if np.isfinite(hi) else survival_lo
+        for distribution, fitter in distributions.items():
+            try:
+                fit = fitter().fit_interval_censoring(
+                    train, lower_bound_col="lo", upper_bound_col="hi", show_progress=False
                 )
-                log_likelihood += np.log(max(probability, 1e-12))
-            rows.append({"fold": fold, "distribution": "LogNormal",
-                         "feature_model": "all_factors", "n_validation": len(validation),
-                         "interval_log_likelihood": log_likelihood,
-                         "mean_log_likelihood": log_likelihood / max(len(validation), 1),
-                         "valid": True})
-        except Exception as exc:
-            rows.append({"fold": fold, "distribution": "LogNormal",
-                         "feature_model": "all_factors", "n_validation": len(validation),
-                         "interval_log_likelihood": np.nan, "mean_log_likelihood": np.nan,
-                         "valid": False, "error": str(exc)})
-    return pd.DataFrame(rows)
+                if not aft_is_valid(fit):
+                    raise RuntimeError("参数或协方差矩阵无效")
+                log_likelihood = 0.0
+                predicted = []
+                observed = []
+                for row, lo, hi in zip(validation[features].to_dict("records"),
+                                       validation_lower, validation_upper):
+                    frame = pd.DataFrame([row])
+                    survival_lo = (float(fit.predict_survival_function(
+                        frame, times=[lo]).iloc[0, 0]) if np.isfinite(lo) else 0.0)
+                    survival_hi = (float(fit.predict_survival_function(
+                        frame, times=[hi]).iloc[0, 0]) if np.isfinite(hi) else 0.0)
+                    probability = (1 - survival_hi) if lo <= 1e-5 else (
+                        survival_lo - survival_hi if np.isfinite(hi) else survival_lo
+                    )
+                    log_likelihood += np.log(max(probability, 1e-12))
+                if {"first_week", "first_attained"}.issubset(validation.columns):
+                    for row, week, attained in zip(
+                            validation[features].to_dict("records"),
+                            validation["first_week"], validation["first_attained"]):
+                        frame = pd.DataFrame([row])
+                        survival = float(fit.predict_survival_function(
+                            frame, times=[float(week)]).iloc[0, 0])
+                        predicted.append(1 - survival)
+                        observed.append(float(attained))
+                auc = (roc_auc_score(observed, predicted)
+                       if len(set(observed)) == 2 else np.nan)
+                brier = brier_score_loss(observed, predicted) if observed else np.nan
+                if predicted:
+                    calibration = pd.DataFrame({"predicted": predicted, "observed": observed})
+                    calibration["bin"] = pd.qcut(
+                        calibration["predicted"], q=5, duplicates="drop"
+                    )
+                    grouped = calibration.groupby("bin", observed=True)
+                    for bin_name, bin_group in grouped:
+                        calibration_rows.append({
+                            "fold": fold, "distribution": distribution,
+                            "bin": str(bin_name), "n": len(bin_group),
+                            "mean_predicted": bin_group["predicted"].mean(),
+                            "mean_observed": bin_group["observed"].mean(),
+                        })
+                rows.append({"fold": fold, "distribution": distribution,
+                             "feature_model": "all_factors", "n_validation": len(validation),
+                             "interval_log_likelihood": log_likelihood,
+                             "mean_log_likelihood": log_likelihood / max(len(validation), 1),
+                             "first_detection_auc": auc, "first_detection_brier": brier,
+                             "valid": True})
+            except Exception as exc:
+                rows.append({"fold": fold, "distribution": distribution,
+                             "feature_model": "all_factors", "n_validation": len(validation),
+                             "interval_log_likelihood": np.nan, "mean_log_likelihood": np.nan,
+                             "first_detection_auc": np.nan, "first_detection_brier": np.nan,
+                             "valid": False, "error": str(exc)})
+    return pd.DataFrame(rows), pd.DataFrame(calibration_rows)
+
+
+def estimate_technical_time_sd(events: pd.DataFrame) -> float:
+    slopes = []
+    for _, group in events.sort_values(["mother_id", "week"]).groupby("mother_id"):
+        weeks = group["week"].to_numpy(float)
+        values = group["sqrt_y"].to_numpy(float)
+        delta_week = np.diff(weeks)
+        delta_value = np.diff(values)
+        valid = np.isfinite(delta_week) & np.isfinite(delta_value) & (delta_week > 0)
+        slopes.extend(np.abs(delta_value[valid] / delta_week[valid]))
+    positive = np.asarray(slopes)[np.asarray(slopes) > 1e-8]
+    slope = float(np.median(positive)) if len(positive) else 0.02
+    return float(np.sqrt(Q1_S2_TECH) / slope)
 
 
 def write_summary(args, events, subject, mixed_name, mixed_table, aft_name, aft_dist, aft_table,
-                  payload, mixed_fit, stats):
+                  payload, mixed_fit, stats, cv_table, calibration_table):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     mixed_table.to_csv(args.output_dir / "q3_mixed_candidates.csv", index=False, encoding="utf-8-sig")
     aft_table.to_csv(args.output_dir / "q3_aft_candidates.csv", index=False, encoding="utf-8-sig")
@@ -469,22 +558,30 @@ def write_summary(args, events, subject, mixed_name, mixed_table, aft_name, aft_
     fixed.to_csv(args.output_dir / "q3_mixed_fixed_effects.csv", index=False, encoding="utf-8-sig")
     uncertainty = parameter_uncertainty(payload, args.bootstrap, subject=subject)
     uncertainty.to_csv(args.output_dir / "q3_uncertainty_summary.csv", index=False, encoding="utf-8-sig")
-    cv_table = grouped_aft_cv(subject, candidate_features(subject))
     cv_table.to_csv(args.output_dir / "q3_aft_grouped_cv.csv", index=False, encoding="utf-8-sig")
+    calibration_table.to_csv(args.output_dir / "q3_aft_calibration.csv", index=False, encoding="utf-8-sig")
     measurement_rows = []
+    aft_prob_fn = prob_fn_from_payload(payload)
+    technical_time_sd = estimate_technical_time_sd(events)
     subject_groups = subject.assign(
         bmi_group=pd.qcut(subject["bmi"], q=4, duplicates="drop")
     )
     for bmi_group, group in subject_groups.groupby("bmi_group", observed=True):
         for week in (12.0, 14.0, 16.0):
-            for label, variance in [("remove_technical", -Q1_S2_TECH),
-                                    ("baseline", 0.0), ("double_technical", Q1_S2_TECH)]:
+            for label in ("remove_technical", "baseline", "double_technical"):
                 probabilities = []
                 for _, row in group.iterrows():
-                    values = {feature: [float(row[feature])] for feature in mixed_fit["features"]}
-                    probabilities.append(mixed_probability(
-                        mixed_fit, events, stats, values, week, variance
+                    base_probability = float(aft_prob_fn(
+                        week, row.bmi, row.height, row.weight, row.age
                     ))
+                    if label == "remove_technical":
+                        probabilities.append(base_probability)
+                    else:
+                        jitter = technical_time_sd * (2.0 if label == "double_technical" else 1.0)
+                        shifted = np.array([max(week - jitter, WEEK_MIN), week + jitter])
+                        probabilities.append(float(np.mean(aft_prob_fn(
+                            shifted, row.bmi, row.height, row.weight, row.age
+                        ))))
                 measurement_rows.append({"bmi_group": str(bmi_group), "bmi_mean": group["bmi"].mean(),
                     "n": len(group), "week": week, "scenario": label,
                     "qualified_probability": float(np.mean(probabilities))})
@@ -497,7 +594,9 @@ def write_summary(args, events, subject, mixed_name, mixed_table, aft_name, aft_
         "mixed_formula": mixed_fit["formula"], "aft_selected": aft_name,
         "aft_distribution": aft_dist, "feature_stats": stats,
         "parameter_mc_draws": args.bootstrap, "technical_variance": Q1_S2_TECH,
-        "aft_cv": "grouped 5-fold; all_factors + LogNormal",
+        "technical_time_sd": technical_time_sd,
+        "aft_selection": "all_factors distribution selected by grouped 5-fold mean interval log-likelihood",
+        "aft_cv": "grouped 5-fold; all_factors + all candidate distributions",
     }
     (args.output_dir / "q3_model_summary.txt").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2) + "\n\nAFT候选比较：\n" +
@@ -515,11 +614,11 @@ def main() -> None:
     events, subject = load_events(args.data)
     stats = standardize(events, subject)
     mixed_name, mixed_fits, mixed_table = fit_mixed_candidates(events, subject)
-    aft_name, aft_dist, aft_fit, aft_table, specs = fit_aft_candidates(subject)
+    aft_name, aft_dist, aft_fit, aft_table, specs, cv_table, calibration_table = fit_aft_candidates(subject)
     payload = export_aft(aft_name, aft_dist, aft_fit, specs, subject, stats, args.output_dir / "q3_model.npy")
     mixed_fit = mixed_fits[mixed_name]
     write_summary(args, events, subject, mixed_name, mixed_table, aft_name, aft_dist,
-                  aft_table, payload, mixed_fit, stats)
+                  aft_table, payload, mixed_fit, stats, cv_table, calibration_table)
     print(f"问题三一号模型完成：{len(subject)} 位孕妇、{len(events)} 个抽血事件")
     print(f"混合模型最优：{mixed_name}; AFT最优：{aft_name}+{aft_dist}")
     print(f"概率接口模型已保存：{args.output_dir / 'q3_model.npy'}")

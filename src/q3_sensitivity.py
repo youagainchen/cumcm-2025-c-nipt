@@ -12,6 +12,7 @@ import pandas as pd
 import scipy.stats as st
 from scipy.special import expit
 
+import q3_model
 from q2_risk import RiskParams
 from q3_optimize import (
     build_risk_matrix,
@@ -179,6 +180,54 @@ def optional_probability_variants(module_name: str | None) -> dict:
     if not isinstance(variants, dict) or not all(callable(v) for v in variants.values()):
         raise RuntimeError("probability_variants() 必须返回 {名称: 可调用概率函数}。")
     return variants
+
+
+def parameter_mc_scenarios(
+    people: pd.DataFrame,
+    params: RiskParams,
+    grid_step: float,
+    draws: int,
+    seed: int = 2026,
+) -> pd.DataFrame:
+    model_path = ROOT / "outputs" / "q3_model.npy"
+    if not model_path.exists():
+        raise FileNotFoundError("未找到 outputs/q3_model.npy，请先运行 q3_model.py")
+    payload = np.load(model_path, allow_pickle=True).item()
+    covariance = (payload["param_cov"] + payload["param_cov"].T) / 2
+    eigenvalues, vectors = np.linalg.eigh(covariance)
+    covariance = (vectors * np.maximum(eigenvalues, 1e-12)) @ vectors.T
+    rng = np.random.default_rng(seed)
+    theta = rng.multivariate_normal(payload["param_values"], covariance, size=draws)
+    rows = []
+    for index, values in enumerate(theta, start=1):
+        if index == 1 or index % 10 == 0 or index == draws:
+            print(f"参数蒙特卡洛分组传播：{index}/{draws}")
+        prob_fn = q3_model.prob_fn_from_payload(payload, values)
+        rows.append(one_scenario(
+            f"parameter_mc_{index:04d}", prob_fn, params, people, grid_step,
+            "parameter_monte_carlo"
+        ))
+    result = pd.DataFrame(rows)
+    result.to_csv(ROOT / "outputs" / "q3_parameter_mc_runs.csv", index=False, encoding="utf-8-sig")
+    total = len(result)
+    valid = result[result["status"] == "ok"].copy()
+    stability_rows = [{
+        "metric": "status", "value": status, "count": int(count),
+        "frequency": float(count / total), "total_draws": total,
+        "valid_draws": len(valid),
+    } for status, count in result["status"].value_counts().items()]
+    for metric in ("k", "integer_cuts", "best_weeks"):
+        values = valid[metric].astype(str)
+        for value, count in values.value_counts().items():
+            stability_rows.append({
+                "metric": metric, "value": value, "count": int(count),
+                "frequency": float(count / max(len(valid), 1)),
+                "total_draws": total, "valid_draws": len(valid),
+            })
+    pd.DataFrame(stability_rows).to_csv(
+        ROOT / "outputs" / "q3_parameter_stability.csv", index=False, encoding="utf-8-sig"
+    )
+    return result
 
 
 def run(prob_fn, source: str, mock: bool, module_name: str | None,
