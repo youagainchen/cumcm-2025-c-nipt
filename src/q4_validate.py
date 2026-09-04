@@ -29,6 +29,7 @@ x_conc 一个变量（事件级/孕妇层面/孕妇内三层证据一致）。
 输出
 ----
 outputs/q4_repeated_cv.csv       重复分组 CV 的逐重复与汇总指标
+outputs/q4_oof_repeated.csv      逐事件样本外预测（含重复与折号，供绘图）
 outputs/q4_model_comparison.csv  带噪声判定的模型对比结论
 outputs/q4_threshold_policy.csv  各折阈值、策略与验证折表现
 outputs/q4_sensitivity.csv       QC/口径/特征集/权重稳健性
@@ -464,6 +465,7 @@ def main() -> None:
 
     per_repeat, oof, thresholds = repeated_cv(events, "label", args.repeats, args.splits)
     per_repeat.to_csv(args.output_dir / "q4_repeated_cv.csv", index=False, encoding="utf-8-sig")
+    oof.to_csv(args.output_dir / "q4_oof_repeated.csv", index=False, encoding="utf-8-sig")
     thresholds.to_csv(args.output_dir / "q4_threshold_policy.csv", index=False, encoding="utf-8-sig")
 
     summary = comparison(per_repeat)
