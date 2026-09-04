@@ -167,8 +167,8 @@ def fit_mixed_candidates(events: pd.DataFrame, subject: pd.DataFrame) -> tuple[s
 def bounds_for_aft(subject: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     if not {"t_left", "t_right", "censored"}.issubset(subject.columns):
         raise ValueError("数据没有问题二所需的 t_left/t_right/censored 字段")
-    lower = subject["t_left"].to_numpy(float)
-    upper = subject["t_right"].to_numpy(float)
+    lower = subject["t_left"].to_numpy(float).copy()
+    upper = subject["t_right"].to_numpy(float).copy()
     censored = subject["censored"].astype(str).to_numpy()
     lower[censored == "left"] = 0.0
     upper[censored == "right"] = np.inf
