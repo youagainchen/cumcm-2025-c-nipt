@@ -1,0 +1,7 @@
+﻿model,target,features,feature_count,C,class_weight,event_count,positive_count
+z,label,z13+z18+z21+zx,4,1.0,none,554,66
+z_quality,label,z13+z18+z21+zx+x_conc+gc+gc13+gc18+gc21+reads_raw+uniq_reads+map_ratio+dup_ratio+filt_ratio,14,1.0,none,554,66
+all,label,z13+z18+z21+zx+x_conc+gc+gc13+gc18+gc21+reads_raw+uniq_reads+map_ratio+dup_ratio+filt_ratio+bmi+week+age,17,1.0,none,554,66
+subtype_T13,label_T13,z13+z18+z21+zx+x_conc+gc+gc13+gc18+gc21+reads_raw+uniq_reads+map_ratio+dup_ratio+filt_ratio,14,1.0,none,554,22
+subtype_T18,label_T18,z13+z18+z21+zx+x_conc+gc+gc13+gc18+gc21+reads_raw+uniq_reads+map_ratio+dup_ratio+filt_ratio,14,1.0,none,554,45
+subtype_T21,label_T21,z13+z18+z21+zx+x_conc+gc+gc13+gc18+gc21+reads_raw+uniq_reads+map_ratio+dup_ratio+filt_ratio,14,1.0,none,554,13

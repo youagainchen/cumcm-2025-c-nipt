@@ -36,7 +36,7 @@
 
 | 问题 | 思路文档 | 代码 | 数据依赖 | 状态 |
 |---|---|---|---|---|
-| 问题一 | `问题一_建模思路.md` | `src/q1_model.py` | `data/processed/male_clean.csv` | ✅ 建模完成，待丙作图 |
-| 问题二 | 待写 | 待写 | `male_clean.csv` 的 `t_left/t_right/censored` | ⬜ |
-| 问题三 | 待写 | 待写 | 同上 + 身高体重年龄 | ⬜ |
-| 问题四 | 待写 | 待写 | `female_clean.csv` 的 `label*` | ⬜ |
+| 问题一 | `问题一_建模思路.md` | `src/q1_model.py`、`src/q1_plot.py` | `male_clean.csv` | ✅ 建模与作图完成 |
+| 问题二 | `问题二_建模思路.md` | `src/q2_*.py` | 男胎首达区间与事件表 | ✅ 建模与作图完成，模型假设仍需在论文披露 |
+| 问题三 | `问题三_建模思路.md` | `src/q3_*.py` | 男胎母亲级/事件级数据 | ✅ 建模与作图完成，稳健性结论从严表述 |
+| 问题四 | `问题四_建模思路.md` | `src/q4_*.py` | `female_clean_event.csv` 的 `label*` | ✅ 建模、验证与6组图完成 |

@@ -24,7 +24,12 @@ fit_model/predict_proba。它由一号的 `q4_evaluate.py`（单次分组 CV）�
   合并  各亚型（T13/T18/T21）单独建模来自一号，此处并入重复 CV，并额外回答
         "亚型专用模型是否真的强过直接拿总体模型分数判该亚型"。亚型的规则
         对照改用**对应那一条染色体的 Z**（T18 用 z18），而不是三条取最大。
-        实测：T18、T21 的专用模型确有超过划分噪声的增益，T13 没有。
+        两臂严格共用同一套亚型分组折。实测：T18、T21 的数值增益超过划分
+        噪声，T13 没有；但 T21 仅 13 个阳性，只作为探索性结果。
+
+  区间  Bootstrap 每次先随机选择一个完整 CV 种子，再按孕妇为簇重抽，
+        同时覆盖“换一批孕妇”和“更换分组划分”的变异，避免点估计与固定
+        单一种子区间混搭。
 
 数据事实提醒（见 q4_signal_audit.py）
 ------------------------------------
@@ -226,10 +231,16 @@ def fit_logit_features(train: pd.DataFrame, features: list[str], target: str):
 
 def run_once(events: pd.DataFrame, target: str, candidate: dict,
              n_splits: int, seed: int,
-             minimum_sensitivity: float = TARGET_SENSITIVITY):
+             minimum_sensitivity: float = TARGET_SENSITIVITY,
+             folds_override=None, fit_target: str | None = None):
     """一次完整的分组 CV，返回 OOF 预测与逐折阈值记录。"""
     y = pd.to_numeric(events[target], errors="coerce").fillna(0).astype(int).to_numpy()
-    folds, actual = folds_for(events, y, n_splits, seed)
+    fit_target = fit_target or target
+    y_fit = pd.to_numeric(events[fit_target], errors="coerce").fillna(0).astype(int).to_numpy()
+    if folds_override is None:
+        folds, actual = folds_for(events, y, n_splits, seed)
+    else:
+        folds, actual = folds_override, len(folds_override)
     oof, thresholds = [], []
     for fold, (train_index, valid_index) in enumerate(folds):
         train, valid = events.iloc[train_index], events.iloc[valid_index]
@@ -239,18 +250,20 @@ def run_once(events: pd.DataFrame, target: str, candidate: dict,
         elif candidate["kind"] in ("tree", "tree_free_logit"):
             features = candidate.get("features") or list(FEATURE_SETS[candidate["feature_set"]])
             builder = fit_tree if candidate["kind"] == "tree" else fit_logit_features
-            estimator = builder(train, features, target)
+            estimator = builder(train, features, fit_target)
             train_score = estimator.predict_proba(
                 train[features].apply(pd.to_numeric, errors="coerce"))[:, 1]
             score = estimator.predict_proba(
                 valid[features].apply(pd.to_numeric, errors="coerce"))[:, 1]
         else:
-            model = fit_model(train, candidate["feature_set"], target,
+            model = fit_model(train, candidate["feature_set"], fit_target,
                               C=candidate.get("C", 1.0),
                               class_weight=candidate.get("class_weight"))
             train_score = predict_proba(model, train)
             score = predict_proba(model, valid)
-        threshold, policy = choose_threshold(y[train_index], train_score, minimum_sensitivity)
+        threshold, policy = choose_threshold(
+            y_fit[train_index], train_score, minimum_sensitivity
+        )
         thresholds.append({"model": candidate["name"], "target": target, "seed": seed,
                            "fold": fold, "n_folds": actual, "threshold": threshold,
                            "policy": policy})
@@ -300,29 +313,47 @@ def subtype_repeated_cv(events: pd.DataFrame, overall_oof: pd.DataFrame,
         if positives < 10:
             print(f"  {subtype}: 阳性仅 {positives} 个事件，跳过单独建模")
             continue
-        for candidate in SUBTYPE_CANDIDATES:
-            candidate = dict(candidate)
-            if candidate["kind"] == "rule":
-                candidate["rule"] = f"z{subtype[1:]}"
-            for repeat in range(repeats):
-                seed = BASE_SEED + repeat
-                oof, _ = run_once(events, target, candidate, n_splits, seed)
+        overall_candidate = next(
+            (dict(candidate) for candidate in CANDIDATES
+             if candidate["name"] == overall_best), None
+        )
+        if overall_candidate is None:
+            raise RuntimeError(f"找不到总体最优模型候选：{overall_best}")
+
+        # 每个亚型/种子只构造一次折。亚型专用模型和总体参照模型必须在
+        # 完全相同的训练/验证孕妇上评分，否则所谓增益会混入划分差异。
+        subtype_y = pd.to_numeric(events[target], errors="coerce").fillna(0).astype(int).to_numpy()
+        for repeat in range(repeats):
+            seed = BASE_SEED + repeat
+            shared_folds, _ = folds_for(events, subtype_y, n_splits, seed)
+            for raw_candidate in SUBTYPE_CANDIDATES:
+                candidate = dict(raw_candidate)
+                if candidate["kind"] == "rule":
+                    candidate["rule"] = f"z{subtype[1:]}"
+                oof, _ = run_once(
+                    events, target, candidate, n_splits, seed,
+                    folds_override=shared_folds,
+                )
                 oof_parts.append(oof)
                 row = metrics(oof.label, oof.score, oof.prediction)
                 row.update({"subtype": subtype, "model": candidate["name"],
                             "seed": seed, "n_positive_events": positives})
                 per_repeat_parts.append(row)
 
-        # 对照：总体模型的 OOF 分数，直接用来判这个亚型
-        block = overall_oof[overall_oof.model == overall_best]
-        truth = pd.to_numeric(events[target], errors="coerce").fillna(0).astype(int).to_numpy()
-        for seed, part in block.groupby("seed"):
-            y = truth[part.row.to_numpy()]
-            if len(np.unique(y)) < 2:
-                continue
-            row = metrics(y, part.score, part.prediction)
+            # 公平参照：仍以总体 label 拟合总体模型，但沿用上面的亚型折；
+            # 验证时把其概率直接对照当前亚型标签。
+            reference_oof, _ = run_once(
+                events, target, overall_candidate, n_splits, seed,
+                folds_override=shared_folds, fit_target="label",
+            )
+            reference_oof = reference_oof.copy()
+            reference_oof["model"] = f"overall_{overall_best}"
+            oof_parts.append(reference_oof)
+            row = metrics(
+                reference_oof.label, reference_oof.score, reference_oof.prediction
+            )
             row.update({"subtype": subtype, "model": f"overall_{overall_best}",
-                        "seed": int(seed), "n_positive_events": positives})
+                        "seed": seed, "n_positive_events": positives})
             per_repeat_parts.append(row)
 
     if not per_repeat_parts:
@@ -384,17 +415,21 @@ def cluster_bootstrap(oof: pd.DataFrame, n_boot: int, seed: int = BASE_SEED) -> 
     只重抽**评估单位**（整位孕妇连同其全部事件），不用于扩增训练阳性样本；
     这是量化"换一批孕妇会怎样"的不确定性，不是数据增强。同一孕妇的多个
     事件必须整体一起进出，否则会低估区间宽度。
-    为避免同一事件被多个重复计入，只用第一个种子的 OOF。
+    每次Bootstrap先从重复CV种子中随机抽取一个完整OOF划分，再以孕妇为簇
+    重抽。这样区间同时覆盖“换一批孕妇”和“更换分组划分”的变异；不会把
+    同一事件在同一次Bootstrap里重复当作来自多个独立种子。
     """
     rng = np.random.default_rng(seed)
     records = []
-    for model, block in oof.groupby("model"):
-        block = block[block.seed == block.seed.min()]
-        by_mother = {m: g for m, g in block.groupby("mother_id")}
-        mothers = np.array(list(by_mother))
+    for model, all_seeds in oof.groupby("model"):
+        seeds = np.array(sorted(all_seeds.seed.unique()))
         draws = {k: [] for k in ("pr_auc", "roc_auc", "sensitivity",
                                  "specificity", "ppv", "npv", "f1", "brier")}
         for _ in range(n_boot):
+            chosen_seed = int(rng.choice(seeds))
+            block = all_seeds[all_seeds.seed == chosen_seed]
+            by_mother = {m: g for m, g in block.groupby("mother_id")}
+            mothers = np.array(list(by_mother))
             picked = rng.choice(mothers, len(mothers), replace=True)
             sample = pd.concat([by_mother[m] for m in picked], ignore_index=True)
             if sample.label.nunique() < 2:
@@ -406,7 +441,16 @@ def cluster_bootstrap(oof: pd.DataFrame, n_boot: int, seed: int = BASE_SEED) -> 
             array = np.asarray([v for v in values if np.isfinite(v)], float)
             if not len(array):
                 continue
+            per_seed = []
+            for _, seed_block in all_seeds.groupby("seed"):
+                value = metrics(
+                    seed_block.label, seed_block.score, seed_block.prediction
+                )[key]
+                if np.isfinite(value):
+                    per_seed.append(value)
             records.append({"model": model, "metric": key, "n_boot": len(array),
+                            "point_mean": float(np.mean(per_seed)),
+                            "bootstrap_design": "random_cv_seed_then_mother_cluster",
                             "median": float(np.median(array)),
                             "ci_low": float(np.percentile(array, 2.5)),
                             "ci_high": float(np.percentile(array, 97.5))})

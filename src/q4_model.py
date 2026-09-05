@@ -348,7 +348,12 @@ def run(data_path: Path | None = None, output_dir: Path | None = None) -> dict:
     model_specs({**models, **{f"subtype_{key}": value for key, value in subtype_models.items()}}, events).to_csv(
         output_dir / "q4_model_candidates.csv", index=False, encoding="utf-8-sig"
     )
-    metadata = {"source": str(resolve_data_path(data_path)), "row_count": int(len(rows)),
+    source_path = resolve_data_path(data_path)
+    try:
+        source_display = source_path.relative_to(ROOT).as_posix()
+    except ValueError:
+        source_display = str(source_path)
+    metadata = {"source": source_display, "row_count": int(len(rows)),
                 "event_count": int(len(events)), "mother_count": int(events["mother_id"].nunique()),
                 "feature_sets": FEATURE_SETS, "subtype_targets": list(SUBTYPES),
                 "label_definition": "event label = max(AB-derived row labels among technical replicates)",

@@ -11,6 +11,7 @@ q4_plot.py —— 二号：问题四建模结果图（不写论文正文）
   q4_03_calibration       概率校准曲线 + 预测分布
   q4_04_confusion_errors  混淆矩阵 + 分层灵敏度
   q4_05_robustness        模型对比（带噪声判定）+ 稳健性 + Bootstrap 区间
+  q4_06_subtype           亚型专用模型与同折总体模型、对应 Z 规则的比较
 
 运行
   python src/q4_validate.py && python src/q4_signal_audit.py && python src/q4_plot.py
@@ -310,7 +311,7 @@ def plot_robustness() -> None:
                  fontsize=14, fontweight="bold")
     fig.text(0.5, -0.02,
              "去掉 BMI 或全部个体变量后性能几乎不变；仅用 x_conc 一个变量即可达到约八成性能；"
-             "每位孕妇只保留首次抽血时性能明显下降。",
+             "仅保留首次抽血时 PR-AUC 随阳性率下降，而 ROC-AUC 近似不变，不能据此断言纵向重复提供增量信息。",
              ha="center", fontsize=9)
     save(fig, "q4_05_robustness")
 
@@ -370,11 +371,11 @@ def plot_subtype() -> None:
     axes[1].set(xlabel="相对总体模型的 PR-AUC 增益（误差棒=划分噪声尺度）",
                 title="B. 红色：增益确实超过划分噪声")
 
-    fig.suptitle("问题四亚型层：T18/T21 值得单独建模，T13 不值得；三条 Z 规则全线失效",
+    fig.suptitle("问题四亚型层：T18 专用模型有增益，T21 仅作探索；三条 Z 规则全线失效",
                  fontsize=14, fontweight="bold")
     fig.text(0.5, -0.045,
              "判定标准：增益需超过两模型跨重复标准差的合成（noise_scale）才算可检出。"
-             "对应染色体的 Z 规则在三个亚型上均落在随机基线附近，与 AB 标签不对应的数据事实一致。",
+             "T21 仅 13 个阳性事件，即使数值越过噪声线也不作稳定结论；对应 Z 规则均接近随机基线。",
              ha="center", fontsize=9)
     save(fig, "q4_06_subtype")
 

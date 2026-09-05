@@ -18,7 +18,7 @@ FINAL_MODEL_NAME = "logit_z_quality"
 FINAL_TARGET = "label"
 
 
-def validation_threshold(output_dir: Path, default: float = 0.0459039119686257) -> float:
+def validation_threshold(output_dir: Path, default: float = 0.0477749567973173) -> float:
     path = output_dir / "q4_threshold_policy.csv"
     if not path.exists():
         return default

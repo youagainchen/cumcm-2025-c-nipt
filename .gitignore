@@ -29,6 +29,15 @@ outputs/*
 !outputs/q3_vs_q2.csv
 !outputs/q3_exact_groups.csv
 !outputs/q3_boundary_stability.csv
+!outputs/q4_*.csv
+!outputs/q4_model_meta.json
+!outputs/q4_model.pkl
+# 问题四逐孕妇/逐事件明细仅在本地生成，禁止推送到公开远端
+outputs/q4_event_table.csv
+outputs/q4_event_predictions.csv
+outputs/q4_oof_repeated.csv
+outputs/q4_subtype_oof.csv
+outputs/q4_errors.csv
 figures/*
 !figures/.gitkeep
 !figures/q1_v4/
@@ -37,6 +46,8 @@ figures/*
 !figures/q2_v1/**
 !figures/q3_v1/
 !figures/q3_v1/**
+!figures/q4_v1/
+!figures/q4_v1/**
 data/processed/*
 !data/processed/.gitkeep
 

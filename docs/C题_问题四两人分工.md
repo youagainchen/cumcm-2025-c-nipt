@@ -84,10 +84,10 @@ OOF PR-AUC 就在 0.416~0.517 间摆动，而候选模型之间只差 ~0.005）�
 | # | 任务 | 依赖 | 交付物 |
 |---|---|---|---|
 | 1 | 搭建按孕妇分组的重复分层交叉验证；先用规则基线和占位Logistic跑通，避免等待一号 | 无 | 固定随机种子的折索引、`src/q4_validate.py` |
-| 2 | 对比规则基线、仅Z值模型、全特征主模型和一个受限非线性模型；输出逐折与合并OOF指标 | 一号T3接口 | `outputs/q4_cv_metrics.csv`、`outputs/q4_oof_predictions.csv` |
-| 3 | 在每个训练折内选择漏诊优先阈值，再在验证折上汇总灵敏度、特异度、PPV、NPV、F1、PR-AUC、ROC-AUC、Brier和混淆矩阵 | 与任务2同步 | `outputs/q4_thresholds.csv`、最终建议阈值 |
-| 4 | 以孕妇为簇做Bootstrap置信区间，只重抽评估单位，不用于扩增训练阳性样本 | 依赖OOF预测 | 各主指标95%置信区间 |
-| 5 | 稳健性分析：剔除QC异常事件、使用行级数据但仍按孕妇分组、去除/保留BMI、不同类别权重、阈值规则变化 | 一号接口可用后 | `src/q4_sensitivity.py`、`outputs/q4_sensitivity.csv` |
+| 2 | 对比规则基线、仅Z值模型、全特征主模型和一个受限非线性模型；输出逐折与合并OOF指标 | 一号T3接口 | `outputs/q4_repeated_cv.csv`、`outputs/q4_oof_repeated.csv`、`outputs/q4_model_comparison.csv` |
+| 3 | 在每个训练折内选择漏诊优先阈值，再在验证折上汇总灵敏度、特异度、PPV、NPV、F1、PR-AUC、ROC-AUC、Brier和混淆矩阵 | 与任务2同步 | `outputs/q4_threshold_policy.csv`、最终建议阈值 |
+| 4 | 每次先抽一个CV种子、再以孕妇为簇做Bootstrap；只重抽评估单位，不用于扩增训练阳性样本 | 依赖OOF预测 | `outputs/q4_bootstrap_ci.csv` |
+| 5 | 稳健性分析：剔除QC异常事件、使用行级数据但仍按孕妇分组、去除/保留BMI、不同类别权重、阈值规则变化 | 一号接口可用后 | 集成于 `src/q4_validate.py`、`outputs/q4_sensitivity.csv` |
 | 6 | 错误分析：列出假阴性、假阳性，按T13/T18/T21、孕周、BMI、QC状态和是否技术重复分层检查 | 依赖最终OOF预测 | `outputs/q4_errors.csv`、分层指标表 |
 | 7 | 生成建模结果图，不写论文：ROC/PR、校准、混淆矩阵、系数或特征贡献、稳健性图 | 任务2—6 | `src/q4_plot.py`、`figures/q4_v1/` |
 
@@ -95,6 +95,7 @@ OOF PR-AUC 就在 0.416~0.517 间摆动，而候选模型之间只差 ~0.005）�
 
 - 使用 `StratifiedGroupKFold` 或等价的孕妇分组分层方案；若某个T13/T21验证折阳性太少，减少折数或采用重复分组留出，不得退回普通随机K折。
 - 所有性能比较必须使用同一组OOF折；阈值不能直接在全数据上调到最好看。
+- 亚型专用模型与总体参照也必须共用同一套亚型分组折，不能把划分差异计成模型增益。
 - 主结果同时报告事件数和孕妇数。对同一孕妇标签变化的情况单独给出说明，不能把事件级准确率包装成孕妇级诊断准确率。
 - AB是题面指定的判定结果，并非羊水穿刺或出生结局金标准；最终模型评价的是“复现AB判定”的能力，不得写成真实胎儿疾病诊断准确率。
 
@@ -127,9 +128,10 @@ T0                         T3                              T5-T7
 ### 代码
 
 - `src/q4_model.py`：规则基线、主模型、逐染色体模型、概率接口；
-- `src/q4_freeze.py`：根据二号样本外评估结果冻结最终模型、阈值及事件判定表；
+- `src/q4_signal_audit.py`：事件级/孕妇级/孕妇内信号审计与Z—AB一致性核查；
 - `src/q4_validate.py`：按孕妇分组的重复交叉验证、阈值、指标、置信区间与亚型模型（已并入原 `q4_evaluate.py`）；
-- `src/q4_sensitivity.py`：QC、数据口径、权重和阈值敏感性；
+- `src/q4_validate.py` 同时负责QC、数据口径、权重和阈值敏感性，不再维护第二套敏感性脚本；
+- `src/q4_freeze.py`：根据正式样本外评估结果冻结最终模型、阈值与事件判定表；
 - `src/q4_plot.py`：统一生成结果图。
 
 ### 结果
@@ -159,43 +161,45 @@ T0                         T3                              T5-T7
 | 9 | 对QC/技术重复/特征集/类别权重/阈值做稳健性 | ✅ | `q4_sensitivity.csv` 七种情景 |
 | 10 | 固定种子后一条命令重现所有CSV与图 | ✅ | 见下方复现命令；种子 `BASE_SEED=2026` |
 | 11 | 结论限定为复现AB筛查，不冒充临床金标准 | ✅ | 各脚本文档字符串与图注均写明；PPV 仅 0.165 已如实披露 |
+| 12 | 亚型专用与总体参照严格同折 | ✅ | 每个亚型/种子只构造一次 `shared_folds`，两臂共同传入 `run_once` |
+| 13 | Bootstrap与5种子点估计口径一致 | ✅ | 每次随机抽CV种子后按孕妇簇重抽，`bootstrap_design=random_cv_seed_then_mother_cluster` |
 
 ### 复现命令（顺序执行，任一步失败即停）
 
 Windows PowerShell 5.1（队里默认环境，**不支持 `&&`**）：
 
 ```powershell
-python src/clean.py; if($?){python src/q4_model.py}; if($?){python src/q4_signal_audit.py}; if($?){python src/q4_validate.py}; if($?){python src/q4_freeze.py}; if($?){python src/q4_plot.py}
+python src/clean.py; if($?){python src/q4_model.py}; if($?){python src/q4_signal_audit.py}; if($?){python src/q4_validate.py}; if($?){python src/q4_plot.py}
 ```
 
 bash / PowerShell 7+：
 
 ```bash
-python src/clean.py && python src/q4_model.py && python src/q4_signal_audit.py && python src/q4_validate.py && python src/q4_freeze.py && python src/q4_plot.py
+python src/clean.py && python src/q4_model.py && python src/q4_signal_audit.py && python src/q4_validate.py && python src/q4_plot.py
 ```
 
 ### 最终结果（logit_z_quality，5 种子 × 5 折 OOF；括号为以孕妇为簇的 Bootstrap 95% 区间）
 
 | 指标 | 值 |
 |---|---|
-| PR-AUC | 0.484 ± 0.037（0.378–0.641） |
-| ROC-AUC | 0.778（0.722–0.856） |
-| 灵敏度 | 0.848（0.776–0.938） |
-| 特异度 | 0.417（0.344–0.444） |
-| PPV | 0.165（0.120–0.213） |
-| NPV | 0.953（0.929–0.980） |
-| Brier | 0.082（0.063–0.102） |
+| PR-AUC | 0.484 ± 0.037（0.330–0.640） |
+| ROC-AUC | 0.778（0.694–0.857） |
+| 灵敏度 | 0.848（0.754–0.938） |
+| 特异度 | 0.417（0.361–0.473） |
+| PPV | 0.165（0.120–0.220） |
+| NPV | 0.953（0.925–0.979） |
+| Brier | 0.082（0.063–0.106） |
 | 混淆矩阵 | TP 56 / FP 284 / TN 204 / FN 10 |
 
 `logit_all` 与之在划分噪声内**不可区分**（差 0.0026 < 噪声 0.0469），论文应报"两者等价，取更简单的 z_quality"。
 受限随机森林 PR-AUC 0.318 显著更差，且 Brier 0.182 比"恒定预测基础发生率"（0.105）还糟——`class_weight="balanced"`
 把概率整体推高，校准崩坏，进一步说明本数据不该上非线性模型。
 
-### 仍需人工确认的一点
+### 事件表接口说明
 
-分工 0.1 写"正式建模单位使用 `female_clean_event.csv`"，但 `q4_model.load_rows()` 实际读行级
-`female_clean.csv` 再自行聚合。两者数值已核对一致到 1e-16（clean.py v3.2 后），结果不受影响；
-若要严格对齐文档措辞，可把 `load_rows` 改为直接读事件文件。
+`q4_model.load_rows()` 先读取行级 `female_clean.csv`，随后由 `aggregate_events()` 在内存中按同一规则生成
+554行事件表；它与 `female_clean_event.csv` 已核对一致到 1e-16。保留这条路径是为了同时支持
+`row_level_wrong_unit` 反面对照，正式模型和全部主结果仍只使用事件表。
 
 ## 六、最容易翻车的四点
 

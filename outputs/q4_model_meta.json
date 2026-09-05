@@ -1,0 +1,57 @@
+{
+  "source": "data/processed/female_clean.csv",
+  "row_count": 605,
+  "event_count": 554,
+  "mother_count": 147,
+  "feature_sets": {
+    "z": [
+      "z13",
+      "z18",
+      "z21",
+      "zx"
+    ],
+    "z_quality": [
+      "z13",
+      "z18",
+      "z21",
+      "zx",
+      "x_conc",
+      "gc",
+      "gc13",
+      "gc18",
+      "gc21",
+      "reads_raw",
+      "uniq_reads",
+      "map_ratio",
+      "dup_ratio",
+      "filt_ratio"
+    ],
+    "all": [
+      "z13",
+      "z18",
+      "z21",
+      "zx",
+      "x_conc",
+      "gc",
+      "gc13",
+      "gc18",
+      "gc21",
+      "reads_raw",
+      "uniq_reads",
+      "map_ratio",
+      "dup_ratio",
+      "filt_ratio",
+      "bmi",
+      "week",
+      "age"
+    ]
+  },
+  "subtype_targets": [
+    "T13",
+    "T18",
+    "T21"
+  ],
+  "label_definition": "event label = max(AB-derived row labels among technical replicates)",
+  "threshold_policy": "probability only; threshold is selected out of subject in q4_validate.py",
+  "default_preview_model": "z_quality"
+}
