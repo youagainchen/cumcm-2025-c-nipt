@@ -476,7 +476,10 @@ def sensitivity_analysis(rows: pd.DataFrame, events: pd.DataFrame,
         scenarios["first_draw_only"] = first
 
     records = []
-    n_repeat = max(repeats // 2, 2)
+    # 必须和主表用同样的重复次数：否则 baseline 这一行与 q4_model_comparison.csv
+    # 里同一个模型的 PR-AUC 对不上（曾经 2 个种子给 0.4989、5 个种子给 0.4842），
+    # 两张正式表出现互相矛盾的"同一个数"。宁可慢一点也要可对账。
+    n_repeat = repeats
 
     def evaluate(scenario, frame, candidate, minimum_sensitivity=TARGET_SENSITIVITY):
         values = []
@@ -492,6 +495,7 @@ def sensitivity_analysis(rows: pd.DataFrame, events: pd.DataFrame,
             return
         table = pd.DataFrame(values)
         records.append({"scenario": scenario, "model": candidate["name"],
+                        "n_repeats": len(table),
                         "n_units": len(frame), "n_mothers": frame.mother_id.nunique(),
                         "pr_auc_mean": table.pr_auc.mean(),
                         "pr_auc_sd": table.pr_auc.std(),

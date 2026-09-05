@@ -253,7 +253,9 @@ def fit_model(events: pd.DataFrame, feature_set: str = "z", target: str = "label
     pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
         ("scaler", StandardScaler()),
-        ("classifier", LogisticRegression(penalty="l2", C=C, class_weight=class_weight,
+        # 不写 penalty="l2"：它本就是默认值，而 sklearn 1.8 起该参数已弃用
+        # （1.10 移除），显式传入只会刷 FutureWarning，行为没有任何差别。
+        ("classifier", LogisticRegression(C=C, class_weight=class_weight,
                                             solver="lbfgs", max_iter=5000, random_state=2026)),
     ])
     pipeline.fit(x, y)
