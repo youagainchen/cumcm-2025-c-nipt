@@ -15,11 +15,13 @@
 ### 评估层口径（已定，勿混用）
 | 脚本 | 定位 | 输出前缀 |
 |---|---|---|
-| `q4_validate.py` | **正式**：5 种子 × 5 折重复分组 CV、规则用连续分数、带噪声判定的模型对比、阈值/稳健性/错误分层/簇 Bootstrap | `q4_repeated_cv`、`q4_model_comparison`、`q4_threshold_policy`、`q4_sensitivity`、`q4_errors`、`q4_error_strata`、`q4_bootstrap_ci`、`q4_oof_repeated` |
-| `q4_evaluate.py` | 辅助：单次划分对照 + 各亚型（T13/T18/T21）单独建模 | `q4_singlesplit_*` |
+| `q4_model.py` | 模型层：特征集定义、fit_model / predict_proba、组间差异 | `q4_group_difference`、`q4_coefficients`、`q4_model.pkl` |
+| `q4_signal_audit.py` | 信号来源审计：事件级/孕妇层面/孕妇内三层 + Z 与标签一致性 | `q4_signal_audit`、`q4_zscore_check` |
+| `q4_validate.py` | **唯一评估口径**：5 种子 × 5 折重复分组 CV、规则用连续分数、带噪声判定的模型对比、阈值/稳健性/错误分层/簇 Bootstrap、**各亚型单独建模** | `q4_repeated_cv`、`q4_model_comparison`、`q4_subtype_comparison`、`q4_threshold_policy`、`q4_sensitivity`、`q4_errors`、`q4_error_strata`、`q4_bootstrap_ci`、`q4_oof_repeated` |
+| `q4_plot.py` | 绘图，只读上面的正式 CSV | `figures/q4_v1/q4_01..06` |
 
-单次划分不足以排名：仅换随机种子，"all" 特征集的 OOF PR-AUC 就在 0.416~0.517 间摆动，而候选模型之间只差 ~0.005。
-论文正文指标一律取 `q4_validate.py` 的输出；`q4_evaluate.py` 的亚型模型可作补充。图（`q4_plot.py`）只读正式表，保证图表同源。
+`q4_evaluate.py` 已合并进 `q4_validate.py` 并删除：它的单次划分不足以排名（仅换随机种子，"all" 特征集的
+OOF PR-AUC 就在 0.416~0.517 间摆动，而候选模型之间只差 ~0.005），但其**亚型单独建模**有价值，已并入重复 CV 框架保留。
 - 主任务标签为 `label`，即 AB 列非空记为1；当前为66/554个异常事件。
 - 辅助任务分别使用 `label_T13`、`label_T18`、`label_T21`，当前事件级阳性数分别为22、45、13，允许同一事件多标签并存。
 - **禁止使用 AE 列 `fetal_health` 作为标签**；该列在女胎数据中全部为“是”。
@@ -81,7 +83,7 @@
 
 | # | 任务 | 依赖 | 交付物 |
 |---|---|---|---|
-| 1 | 搭建按孕妇分组的重复分层交叉验证；先用规则基线和占位Logistic跑通，避免等待一号 | 无 | 固定随机种子的折索引、`src/q4_evaluate.py` |
+| 1 | 搭建按孕妇分组的重复分层交叉验证；先用规则基线和占位Logistic跑通，避免等待一号 | 无 | 固定随机种子的折索引、`src/q4_validate.py` |
 | 2 | 对比规则基线、仅Z值模型、全特征主模型和一个受限非线性模型；输出逐折与合并OOF指标 | 一号T3接口 | `outputs/q4_cv_metrics.csv`、`outputs/q4_oof_predictions.csv` |
 | 3 | 在每个训练折内选择漏诊优先阈值，再在验证折上汇总灵敏度、特异度、PPV、NPV、F1、PR-AUC、ROC-AUC、Brier和混淆矩阵 | 与任务2同步 | `outputs/q4_thresholds.csv`、最终建议阈值 |
 | 4 | 以孕妇为簇做Bootstrap置信区间，只重抽评估单位，不用于扩增训练阳性样本 | 依赖OOF预测 | 各主指标95%置信区间 |
@@ -125,7 +127,7 @@ T0                         T3                              T5-T7
 ### 代码
 
 - `src/q4_model.py`：规则基线、主模型、逐染色体模型、概率接口；
-- `src/q4_evaluate.py`：按孕妇分组的交叉验证、阈值、指标与置信区间；
+- `src/q4_validate.py`：按孕妇分组的重复交叉验证、阈值、指标、置信区间与亚型模型（已并入原 `q4_evaluate.py`）；
 - `src/q4_sensitivity.py`：QC、数据口径、权重和阈值敏感性；
 - `src/q4_plot.py`：统一生成结果图。
 

@@ -6,13 +6,10 @@ same ``(mother_id, draw_idx)`` are aggregated before fitting. AB is the only
 source of the event label. This module deliberately returns probabilities;
 sample-out-of-subject threshold selection belongs to the evaluation layer.
 
-Evaluation layer (see docs/C题_问题四两人分工.md):
-  q4_validate.py   OFFICIAL. Repeated grouped CV (5 seeds x 5 folds), continuous
-                   rule scores, noise-aware model comparison, thresholds,
-                   sensitivity, error strata, cluster bootstrap.
-  q4_evaluate.py   Auxiliary single-split check plus per-subtype models; writes
-                   under the q4_singlesplit_ prefix so it cannot collide with
-                   the official outputs.
+Evaluation layer: q4_validate.py is the single official pipeline (repeated
+grouped CV over 5 seeds x 5 folds, continuous rule scores, noise-aware model
+comparison, thresholds, sensitivity, error strata, per-subtype models and
+cluster bootstrap). The former q4_evaluate.py has been merged into it.
 """
 from __future__ import annotations
 
@@ -353,7 +350,7 @@ def run(data_path: Path | None = None, output_dir: Path | None = None) -> dict:
                 "event_count": int(len(events)), "mother_count": int(events["mother_id"].nunique()),
                 "feature_sets": FEATURE_SETS, "subtype_targets": list(SUBTYPES),
                 "label_definition": "event label = max(AB-derived row labels among technical replicates)",
-                "threshold_policy": "probability only; threshold is selected out of subject in q4_evaluate.py",
+                "threshold_policy": "probability only; threshold is selected out of subject in q4_validate.py",
                 "default_preview_model": "z_quality"}
     (output_dir / "q4_model_meta.json").write_text(json.dumps(metadata, ensure_ascii=True, indent=2), encoding="utf-8")
     with open(output_dir / "q4_model.pkl", "wb") as handle:

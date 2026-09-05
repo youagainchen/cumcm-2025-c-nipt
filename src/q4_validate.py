@@ -2,11 +2,12 @@
 """
 q4_validate.py —— 二号：重复分组验证、阈值、稳健性与错误分析
 
-与 q4_evaluate.py 的关系
-------------------------
-一号的 `q4_evaluate.py` 已搭出单次分组交叉验证。本模块不重复其模型层
-（直接复用 `q4_model` 的 fit_model/predict_proba），只修两处会影响结论
-的缺陷，并补齐分工文档中二号的任务 3-6：
+定位：问题四**唯一**的评估口径
+------------------------------
+本模块是论文正式取数的评估层，模型层直接复用 `q4_model` 的
+fit_model/predict_proba。它由一号的 `q4_evaluate.py`（单次分组 CV）合并而来：
+保留其中**各亚型单独建模**的部分并入重复 CV 框架，修掉两处会影响结论的缺陷，
+再补齐分工文档中二号的任务 3-6。`q4_evaluate.py` 已删除，不再有第二套口径。
 
   缺陷1 单次划分不稳定。实测仅更换随机种子，"all" 特征集的 OOF PR-AUC 在
         0.416~0.517 之间摆动（极差 0.10），而候选模型之间的差距只有 0.005
@@ -19,6 +20,11 @@ q4_validate.py —— 二号：重复分组验证、阈值、稳健性与错误�
         赋**连续分数**（各染色体 Z 的最大值 / 最大绝对值），使其与模型在
         同一套 PR-AUC、ROC-AUC 与阈值框架下比较；同时保留题面 Z>3 的硬
         判定作为固定操作点单独汇报。
+
+  合并  各亚型（T13/T18/T21）单独建模来自一号，此处并入重复 CV，并额外回答
+        "亚型专用模型是否真的强过直接拿总体模型分数判该亚型"。亚型的规则
+        对照改用**对应那一条染色体的 Z**（T18 用 z18），而不是三条取最大。
+        实测：T18、T21 的专用模型确有超过划分噪声的增益，T13 没有。
 
 数据事实提醒（见 q4_signal_audit.py）
 ------------------------------------
@@ -36,6 +42,9 @@ outputs/q4_sensitivity.csv       QC/口径/特征集/权重稳健性
 outputs/q4_errors.csv            逐事件错误清单（含多数表决预测）
 outputs/q4_error_strata.csv      按亚型/孕周/BMI/QC/技术重复的分层指标
 outputs/q4_bootstrap_ci.csv      以孕妇为簇的 Bootstrap 95% 置信区间
+outputs/q4_subtype_cv.csv        各亚型逐重复指标
+outputs/q4_subtype_oof.csv       各亚型逐事件样本外预测
+outputs/q4_subtype_comparison.csv 亚型专用模型 vs 直接用总体模型分数
 
 运行
 ----
@@ -119,10 +128,18 @@ def choose_threshold(y, score, minimum_sensitivity=TARGET_SENSITIVITY):
 # ---------------------------------------------------------------- 候选
 
 def rule_score(events: pd.DataFrame, kind: str) -> np.ndarray:
-    """规则基线的连续分数，使其与模型概率在同一框架下可比。"""
-    z = events[["z13", "z18", "z21"]].apply(pd.to_numeric, errors="coerce").to_numpy(float)
-    z = np.nan_to_num(z, nan=0.0)
-    return np.nanmax(np.abs(z), axis=1) if kind == "abs" else np.nanmax(z, axis=1)
+    """规则基线的连续分数，使其与模型概率在同一框架下可比。
+
+    kind 取 "signed"/"abs" 时用三条染色体 Z 的最大值/最大绝对值（整体判阳）；
+    取 "z18" 这类单列名时只用该染色体的 Z —— 亚型模型的临床对照就是"看对应
+    那一条染色体的 Z"，用三条取最大反而不公平。
+    """
+    if kind in ("signed", "abs"):
+        z = events[["z13", "z18", "z21"]].apply(pd.to_numeric, errors="coerce").to_numpy(float)
+        z = np.nan_to_num(z, nan=0.0)
+        return np.nanmax(np.abs(z), axis=1) if kind == "abs" else np.nanmax(z, axis=1)
+    column = pd.to_numeric(events[kind], errors="coerce").to_numpy(float)
+    return np.nan_to_num(column, nan=0.0)
 
 
 def fit_tree(train: pd.DataFrame, features: list[str], target: str):
@@ -155,6 +172,15 @@ CANDIDATES = (
        for name in FEATURE_SETS]
     + [{"name": "forest_all_depth3", "kind": "tree", "feature_set": "all"}]
 )
+
+
+# 亚型模型的候选：临床对照(对应染色体的 Z) + 一号选定的 z_quality + 全特征。
+# 亚型阳性数极少（T13 22 / T18 45 / T21 13 个事件），再多候选只会过拟合比较过程。
+SUBTYPE_CANDIDATES = [
+    {"name": "rule_z_own", "kind": "rule"},                       # rule 列在运行时按亚型填
+    {"name": "logit_z_quality", "kind": "model", "feature_set": "z_quality"},
+    {"name": "logit_all", "kind": "model", "feature_set": "all"},
+]
 
 
 def folds_for(events: pd.DataFrame, y: np.ndarray, n_splits: int, seed: int):
@@ -247,6 +273,80 @@ def repeated_cv(events: pd.DataFrame, target: str, repeats: int, n_splits: int):
             records.append(row)
     return (pd.DataFrame(records), pd.concat(oof_parts, ignore_index=True),
             pd.concat(threshold_parts, ignore_index=True))
+
+
+def subtype_repeated_cv(events: pd.DataFrame, overall_oof: pd.DataFrame,
+                        overall_best: str, repeats: int, n_splits: int):
+    """各亚型(T13/T18/T21)单独建模，同样走重复分组 CV。
+
+    这一层来自一号 q4_evaluate.py 的亚型模型，但那里是单次划分；在只有
+    13~45 个阳性事件的亚型上，单次划分的排名基本是噪声。此处并入重复 CV
+    框架，并额外回答一个更有用的问题：**亚型专用模型是否真的比直接拿总体
+    模型的分数去判该亚型更好**——若不是，论文就该只报总体模型 + 分亚型
+    灵敏度，不必声称做了亚型判别。
+    """
+    per_repeat_parts, oof_parts = [], []
+    for subtype in SUBTYPES:
+        target = f"label_{subtype}"
+        if target not in events.columns:
+            continue
+        positives = int(pd.to_numeric(events[target], errors="coerce").fillna(0).sum())
+        if positives < 10:
+            print(f"  {subtype}: 阳性仅 {positives} 个事件，跳过单独建模")
+            continue
+        for candidate in SUBTYPE_CANDIDATES:
+            candidate = dict(candidate)
+            if candidate["kind"] == "rule":
+                candidate["rule"] = f"z{subtype[1:]}"
+            for repeat in range(repeats):
+                seed = BASE_SEED + repeat
+                oof, _ = run_once(events, target, candidate, n_splits, seed)
+                oof_parts.append(oof)
+                row = metrics(oof.label, oof.score, oof.prediction)
+                row.update({"subtype": subtype, "model": candidate["name"],
+                            "seed": seed, "n_positive_events": positives})
+                per_repeat_parts.append(row)
+
+        # 对照：总体模型的 OOF 分数，直接用来判这个亚型
+        block = overall_oof[overall_oof.model == overall_best]
+        truth = pd.to_numeric(events[target], errors="coerce").fillna(0).astype(int).to_numpy()
+        for seed, part in block.groupby("seed"):
+            y = truth[part.row.to_numpy()]
+            if len(np.unique(y)) < 2:
+                continue
+            row = metrics(y, part.score, part.prediction)
+            row.update({"subtype": subtype, "model": f"overall_{overall_best}",
+                        "seed": int(seed), "n_positive_events": positives})
+            per_repeat_parts.append(row)
+
+    if not per_repeat_parts:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    per_repeat = pd.DataFrame(per_repeat_parts)
+    summary = (per_repeat.groupby(["subtype", "model"])
+               .agg(n_positive_events=("n_positive_events", "max"),
+                    pr_auc_mean=("pr_auc", "mean"), pr_auc_sd=("pr_auc", "std"),
+                    roc_auc_mean=("roc_auc", "mean"), roc_auc_sd=("roc_auc", "std"),
+                    sensitivity_mean=("sensitivity", "mean"),
+                    specificity_mean=("specificity", "mean"),
+                    ppv_mean=("ppv", "mean"), repeats=("pr_auc", "size"))
+               .reset_index())
+    # 每个亚型内部：专用模型 vs 总体模型，差距是否超过划分噪声
+    flags = []
+    for subtype, block in summary.groupby("subtype"):
+        reference = block[block.model.str.startswith("overall_")]
+        base = reference.iloc[0] if len(reference) else None
+        for _, row in block.iterrows():
+            if base is None or row.model == base.model:
+                flags.append({"gap_vs_overall": np.nan, "noise_scale": np.nan,
+                              "beats_overall": False})
+                continue
+            gap = row.pr_auc_mean - base.pr_auc_mean
+            noise = float(np.sqrt(row.pr_auc_sd ** 2 + base.pr_auc_sd ** 2))
+            flags.append({"gap_vs_overall": gap, "noise_scale": noise,
+                          "beats_overall": bool(gap > noise)})
+    summary = pd.concat([summary.reset_index(drop=True), pd.DataFrame(flags)], axis=1)
+    summary = summary.sort_values(["subtype", "pr_auc_mean"], ascending=[True, False])
+    return per_repeat, pd.concat(oof_parts, ignore_index=True), summary
 
 
 def comparison(per_repeat: pd.DataFrame) -> pd.DataFrame:
@@ -510,6 +610,26 @@ def main() -> None:
     print("\n【错误分层】按亚型/孕周/BMI/QC/技术重复")
     print(strata.round(3).to_string(index=False))
 
+    print(f"\n【亚型单独建模】T13/T18/T21 各自作为目标，同样 {args.repeats} 个种子重复分组 CV")
+    subtype_per_repeat, subtype_oof, subtype_summary = subtype_repeated_cv(
+        events, oof, best_model, args.repeats, args.splits)
+    if len(subtype_summary):
+        subtype_per_repeat.to_csv(args.output_dir / "q4_subtype_cv.csv",
+                                  index=False, encoding="utf-8-sig")
+        subtype_oof.to_csv(args.output_dir / "q4_subtype_oof.csv",
+                           index=False, encoding="utf-8-sig")
+        subtype_summary.to_csv(args.output_dir / "q4_subtype_comparison.csv",
+                               index=False, encoding="utf-8-sig")
+        print(subtype_summary[["subtype", "model", "n_positive_events", "pr_auc_mean",
+                               "pr_auc_sd", "sensitivity_mean", "gap_vs_overall",
+                               "noise_scale", "beats_overall"]]
+              .round(4).to_string(index=False))
+        winners = subtype_summary[subtype_summary.beats_overall].subtype.unique().tolist()
+        print(f"-> 亚型专用模型确实优于直接用总体模型分数的亚型：{winners or '无'}")
+        if not winners:
+            print("   即：单独建亚型模型没有带来可检出的增益，论文应只报总体模型 + "
+                  "分亚型灵敏度（见 q4_error_strata.csv），不宜声称完成了亚型判别。")
+
     sensitivity = sensitivity_analysis(rows, events, args.repeats, args.splits)
     sensitivity.to_csv(args.output_dir / "q4_sensitivity.csv", index=False, encoding="utf-8-sig")
     print("\n【稳健性】各口径下最优模型的 PR-AUC")
@@ -517,7 +637,7 @@ def main() -> None:
              [["scenario", "n_units", "n_mothers", "pr_auc_mean", "pr_auc_sd"]])
     print(pivot.round(4).to_string(index=False))
 
-    print("\n已输出 q4_repeated_cv / q4_model_comparison / q4_threshold_policy / "
+    print("\n已输出 q4_repeated_cv / q4_model_comparison / q4_subtype_comparison / q4_threshold_policy / "
           "q4_errors / q4_sensitivity")
 
 

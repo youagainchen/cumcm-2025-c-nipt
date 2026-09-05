@@ -69,7 +69,8 @@ def save(fig: plt.Figure, stem: str) -> None:
 def check_inputs() -> None:
     required = ["q4_oof_repeated.csv", "q4_model_comparison.csv", "q4_bootstrap_ci.csv",
                 "q4_errors.csv", "q4_error_strata.csv", "q4_sensitivity.csv",
-                "q4_signal_audit.csv", "q4_zscore_check.csv"]
+                "q4_signal_audit.csv", "q4_zscore_check.csv",
+                "q4_subtype_comparison.csv"]
     missing = [name for name in required if not (OUT / name).exists()]
     if missing:
         raise SystemExit(f"缺少问题四结果：{missing}\n"
@@ -314,6 +315,70 @@ def plot_robustness() -> None:
     save(fig, "q4_05_robustness")
 
 
+# ---------------------------------------------------------------- 图6
+
+def plot_subtype() -> None:
+    """亚型层：专用模型 vs 直接用总体模型分数，以及对应染色体 Z 规则的失效。"""
+    table = pd.read_csv(OUT / "q4_subtype_comparison.csv", encoding="utf-8-sig")
+    order = ["rule_z_own", "overall_logit_z_quality", "logit_all", "logit_z_quality"]
+    names = {"rule_z_own": "规则：对应染色体 Z",
+             "overall_logit_z_quality": "总体模型分数",
+             "logit_all": "亚型专用 logit(all)",
+             "logit_z_quality": "亚型专用 logit(z+质量)"}
+    palette = {"rule_z_own": "#9aa7b1", "overall_logit_z_quality": "#f0a05a",
+               "logit_all": "#8ab4d8", "logit_z_quality": "#4c78a8"}
+
+    subtypes = list(dict.fromkeys(table.subtype))
+    fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.0))
+
+    width = 0.2
+    base = np.arange(len(subtypes), dtype=float)
+    for k, model in enumerate(order):
+        block = table[table.model == model].set_index("subtype")
+        means = [float(block.pr_auc_mean.get(st, np.nan)) for st in subtypes]
+        sds = [float(block.pr_auc_sd.get(st, np.nan)) for st in subtypes]
+        axes[0].bar(base + (k - 1.5) * width, means, width, yerr=sds, capsize=3,
+                    color=palette[model], label=names[model])
+    # 各亚型的阳性率 = PR-AUC 的随机基线
+    prevalence = [float(table[table.subtype == st].n_positive_events.iloc[0]) / 554
+                  for st in subtypes]
+    for x, level in zip(base, prevalence):
+        axes[0].hlines(level, x - 0.42, x + 0.42, color="#b2182b", ls=":", lw=1.4)
+    axes[0].hlines([], [], [], color="#b2182b", ls=":", lw=1.4, label="随机基线（阳性率）")
+    counts = {st: int(table[table.subtype == st].n_positive_events.iloc[0]) for st in subtypes}
+    axes[0].set_xticks(base, [f"{st}\n（{counts[st]} 个阳性事件）" for st in subtypes])
+    axes[0].set(ylabel="PR-AUC（5 次重复均值±标准差）",
+                title="")
+    axes[0].set_title("A. 各亚型：专用模型 vs 总体模型 vs 临床规则")
+    # 图例挪到坐标区上方：T18 的柱很高，压在图内会盖住数据
+    top = float(np.nanmax(table.pr_auc_mean + table.pr_auc_sd.fillna(0)))
+    axes[0].set_ylim(0, top * 1.12)
+    axes[0].legend(frameon=False, fontsize=8.5, ncol=2,
+                   loc="upper center", bbox_to_anchor=(0.5, -0.16))
+
+    # B. 增益是否超过划分噪声
+    gains = table[table.gap_vs_overall.notna()].copy()
+    gains["tag"] = gains.subtype + " · " + gains.model.map(names)
+    gains = gains.sort_values("gap_vs_overall")
+    y = np.arange(len(gains))
+    colors = ["#b2182b" if flag else "#9aa7b1" for flag in gains.beats_overall]
+    axes[1].barh(y, gains.gap_vs_overall, height=0.62, color=colors)
+    axes[1].errorbar(gains.gap_vs_overall, y, xerr=gains.noise_scale, fmt="none",
+                     ecolor="#333333", capsize=3, lw=1.1)
+    axes[1].axvline(0, color="#333333", lw=1)
+    axes[1].set_yticks(y, gains.tag, fontsize=8.5)
+    axes[1].set(xlabel="相对总体模型的 PR-AUC 增益（误差棒=划分噪声尺度）",
+                title="B. 红色：增益确实超过划分噪声")
+
+    fig.suptitle("问题四亚型层：T18/T21 值得单独建模，T13 不值得；三条 Z 规则全线失效",
+                 fontsize=14, fontweight="bold")
+    fig.text(0.5, -0.045,
+             "判定标准：增益需超过两模型跨重复标准差的合成（noise_scale）才算可检出。"
+             "对应染色体的 Z 规则在三个亚型上均落在随机基线附近，与 AB 标签不对应的数据事实一致。",
+             ha="center", fontsize=9)
+    save(fig, "q4_06_subtype")
+
+
 def main() -> None:
     setup()
     check_inputs()
@@ -322,7 +387,8 @@ def main() -> None:
     plot_calibration()
     plot_confusion_errors()
     plot_robustness()
-    print("完成：5 张 PNG + 5 张 PDF")
+    plot_subtype()
+    print("完成：6 张 PNG + 6 张 PDF")
 
 
 if __name__ == "__main__":
