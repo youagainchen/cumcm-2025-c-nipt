@@ -1,0 +1,27 @@
+{
+  "model_name": "logit_z_quality",
+  "feature_set": "z_quality",
+  "target": "label",
+  "threshold": 0.0459039119686257,
+  "threshold_policy": "median of repeated grouped-CV training-fold thresholds; sensitivity priority 90%",
+  "label_definition": "AB non-empty = abnormal, aggregated per blood-draw event",
+  "event_count": 554,
+  "mother_count": 147,
+  "validation_summary": {
+    "model": "logit_z_quality",
+    "pr_auc_mean": 0.4832513853617383,
+    "pr_auc_sd": 0.0283856755338754,
+    "roc_auc_mean": 0.7794771485345257,
+    "roc_auc_sd": 0.0155513236095673,
+    "sensitivity_mean": 0.8545454545454545,
+    "specificity_mean": 0.4180327868852458,
+    "ppv_mean": 0.1656825704756509,
+    "npv_mean": 0.9553571539296358,
+    "f1_mean": 0.2775162594724564,
+    "brier_mean": 0.0826853994221916,
+    "repeats": 5,
+    "gap_vs_best": 0.0,
+    "noise_scale": 0.0401434073171287,
+    "distinguishable_from_best": false
+  }
+}

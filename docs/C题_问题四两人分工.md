@@ -127,6 +127,7 @@ T0                         T3                              T5-T7
 ### 代码
 
 - `src/q4_model.py`：规则基线、主模型、逐染色体模型、概率接口；
+- `src/q4_freeze.py`：根据二号样本外评估结果冻结最终模型、阈值及事件判定表；
 - `src/q4_validate.py`：按孕妇分组的重复交叉验证、阈值、指标、置信区间与亚型模型（已并入原 `q4_evaluate.py`）；
 - `src/q4_sensitivity.py`：QC、数据口径、权重和阈值敏感性；
 - `src/q4_plot.py`：统一生成结果图。
@@ -164,13 +165,13 @@ T0                         T3                              T5-T7
 Windows PowerShell 5.1（队里默认环境，**不支持 `&&`**）：
 
 ```powershell
-python src/clean.py; if($?){python src/q4_model.py}; if($?){python src/q4_signal_audit.py}; if($?){python src/q4_validate.py}; if($?){python src/q4_plot.py}
+python src/clean.py; if($?){python src/q4_model.py}; if($?){python src/q4_signal_audit.py}; if($?){python src/q4_validate.py}; if($?){python src/q4_freeze.py}; if($?){python src/q4_plot.py}
 ```
 
 bash / PowerShell 7+：
 
 ```bash
-python src/clean.py && python src/q4_model.py && python src/q4_signal_audit.py && python src/q4_validate.py && python src/q4_plot.py
+python src/clean.py && python src/q4_model.py && python src/q4_signal_audit.py && python src/q4_validate.py && python src/q4_freeze.py && python src/q4_plot.py
 ```
 
 ### 最终结果（logit_z_quality，5 种子 × 5 折 OOF；括号为以孕妇为簇的 Bootstrap 95% 区间）
