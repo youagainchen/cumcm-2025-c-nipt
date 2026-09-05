@@ -19,6 +19,12 @@ v3 相对 v1/v2 的关键修订（对应队友质检 4 个问题）：
      最乐观、系统性低估首次达标孕周”），同时保留 any 口径作敏感性对照（见 *_any 后缀）。
   3) 源数据孕周时序异常打 flag_chrono（例：A151 抽血日期更晚但孕周回退），只标不修。
   4) GC 阈值改为稳健离群(箱线)打 flag_gc；题面 40%~60% 只作参考统计单列，避免 41% 假红。
+
+v3.2 修订（对应问题四反馈：事件级文件缺特征列）：
+  5) 事件级文件补齐**全部测量列**（z13/z18/z21/zx、x_conc、GC 系列、测序质量比例），
+     一次抽血内多次测序取组内均值，并给出组内标准差 `*_sd`（n_reps≥2 时有值，量化技术误差）；
+     同时补 sample_id/lmp/ivf/gravidity/parity 等登记列与事件级 QC flag、统一主键 event_id。
+     此前女胎事件文件只有标签与人口学列，导致问题四两人各自从行级重新聚合、口径可能漂移。
   —— 事件内多次测序 = 技术重复（测量误差），事件之间 = 随访（纵向），孕妇之间 = 个体差异；
      供三层嵌套模型使用（孕妇/抽血/测序）。
 
@@ -72,6 +78,17 @@ MAP = {
 NUM_LETTERS = set("CDEKLMNOPQRSTUVWXYZ") | {"AA", "AC", "AD"}
 NUM_COLS = {MAP[c] for c in NUM_LETTERS}
 REP_COLS = ["rep_in_draw", "n_reps_in_draw", "is_tech_repeat"]
+
+# 事件级需要携带的测量列（v3.2）：一次抽血内的多次测序是技术重复，取组内均值
+# 作为该次抽血的测量值 —— 与"事件=一次随访"的语义一致，也避免下游各自重新
+# 聚合导致口径漂移（问题四曾出现两人各自从行级聚合的情况）。
+EVENT_MEAN_COLS = ["z13", "z18", "z21", "zx", "x_conc",
+                   "gc", "gc13", "gc18", "gc21",
+                   "reads_raw", "uniq_reads", "map_ratio", "dup_ratio", "filt_ratio"]
+# 事件内恒定的登记信息：取组内首个非空
+EVENT_FIRST_COLS = ["sample_id", "lmp", "ivf", "gravidity", "parity", "week_raw_s"]
+# 事件级 QC flag：组内任一为 1 则该事件为 1
+EVENT_FLAG_COLS = ["flag_gc", "flag_map_ratio", "flag_dup_ratio", "flag_filt_ratio"]
 
 # ---------------------------------------------------------------- 工具
 def to_float(v):
@@ -292,7 +309,21 @@ def build_event_records(recs, is_male):
                 "week_max": max(weeks) if weeks else None,
                 "week_mean": (sum(weeks) / len(weeks)) if weeks else None,
             }
+            for col in EVENT_MEAN_COLS:
+                vals = [r[col] for r in rep if r[col] is not None]
+                ev[col] = (sum(vals) / len(vals)) if vals else None
+                if len(vals) >= 2:
+                    m = ev[col]
+                    ev[col + "_sd"] = (sum((v - m) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
+                else:
+                    ev[col + "_sd"] = None
+            for col in EVENT_FIRST_COLS:
+                ev[col] = next((r[col] for r in rep if r[col] is not None), None)
+            for col in EVENT_FLAG_COLS:
+                ev[col] = max(r[col] for r in rep)
             if is_male:
+                zy = [r["zy"] for r in rep if r["zy"] is not None]
+                ev["zy"] = (sum(zy) / len(zy)) if zy else None
                 y = [r["y_conc"] for r in rep if r["y_conc"] is not None]
                 m = (sum(y) / len(y)) if y else None
                 ev.update({
@@ -314,8 +345,10 @@ def build_event_records(recs, is_male):
                     "label_T18": 1 if any(r["label_T18"] for r in rep) else 0,
                     "label_T21": 1 if any(r["label_T21"] for r in rep) else 0,
                     "aneuploidy_raw": "/".join(ab) if ab else None,
+                    "label_disagree": 1 if len({r["label"] for r in rep}) > 1 else 0,
                     "flag_any": 1 if any(r["flag_any"] for r in rep) else 0,
                 })
+            ev["event_id"] = f"{mid}_draw{dr}"
             evs.append(ev)
     return evs
 
@@ -671,18 +704,22 @@ def main():
                                  "flag_dup_ratio", "flag_filt_ratio", "flag_any"])
     male_min_cols = ["mother_id", "age", "height", "weight", "bmi", "week",
                      "y_conc", "draw_idx", "visit_idx", "n_visits"] + REP_COLS
-    male_event_cols = (["mother_id", "draw_idx", "visit_idx", "n_reps", "is_tech_repeat",
-                        "flag_chrono", "age", "height", "weight", "bmi", "draw_date",
-                        "week_min", "week_max", "week_mean",
-                        "y_conc_n", "y_conc_min", "y_conc_mean", "y_conc_max", "y_conc_sd",
-                        "qual_any", "qual_mean"]
+    meas_cols = EVENT_MEAN_COLS + [c + "_sd" for c in EVENT_MEAN_COLS]
+    event_head = ["event_id", "mother_id", "sample_id", "draw_idx", "visit_idx",
+                  "n_reps", "is_tech_repeat", "flag_chrono",
+                  "age", "height", "weight", "bmi",
+                  "lmp", "ivf", "gravidity", "parity",
+                  "draw_date", "week_raw_s", "week_min", "week_max", "week_mean"]
+    event_tail = EVENT_FLAG_COLS + ["flag_any"]
+    male_event_cols = (event_head
+                       + ["y_conc_n", "y_conc_min", "y_conc_mean", "y_conc_max", "y_conc_sd",
+                          "zy", "qual_any", "qual_mean"]
                        + surv_cols + [c + "_any" for c in surv_cols]
-                       + ["flag_any"])
-    female_event_cols = ["mother_id", "draw_idx", "visit_idx", "n_reps", "is_tech_repeat",
-                         "flag_chrono", "age", "height", "weight", "bmi", "draw_date",
-                         "week_min", "week_max", "week_mean",
-                         "label", "label_T13", "label_T18", "label_T21",
-                         "aneuploidy_raw", "flag_any"]
+                       + meas_cols + event_tail)
+    female_event_cols = (event_head
+                         + ["label", "label_T13", "label_T18", "label_T21",
+                            "aneuploidy_raw", "label_disagree"]
+                         + meas_cols + event_tail)
 
     write_csv(OUT_DIR / "male_min.csv", male, male_min_cols)
     write_csv(OUT_DIR / "male_clean.csv", male, male_clean_cols)
@@ -692,7 +729,7 @@ def main():
     REPORT_PATH.write_text(make_report(male, female, ev_male, ev_female), encoding="utf-8")
 
     print("OK -> data/processed/{male_min,male_clean,female_clean,male_clean_event,"
-          "female_clean_event}.csv + docs/data_report.md  [v3]")
+          "female_clean_event}.csv + docs/data_report.md  [v3.2]")
     print(f"male rows={len(male)} events={len(ev_male)} | "
           f"female rows={len(female)} events={len(ev_female)}")
 

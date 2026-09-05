@@ -9,6 +9,17 @@
 ### 0.1 固定数据与标签口径
 
 - 正式建模单位使用 `data/processed/female_clean_event.csv`：554个抽血事件、147位孕妇，避免把同一次抽血的技术重复当成独立样本。
+  （clean.py v3.2 起该文件已自带 z13/z18/z21/zx、x_conc、GC 与测序质量等全部测量列，无需再从行级自行聚合；
+  `q4_model.py` 也不再覆盖这个文件，其对账副本改存 `outputs/q4_event_table.csv`。）
+
+### 评估层口径（已定，勿混用）
+| 脚本 | 定位 | 输出前缀 |
+|---|---|---|
+| `q4_validate.py` | **正式**：5 种子 × 5 折重复分组 CV、规则用连续分数、带噪声判定的模型对比、阈值/稳健性/错误分层/簇 Bootstrap | `q4_repeated_cv`、`q4_model_comparison`、`q4_threshold_policy`、`q4_sensitivity`、`q4_errors`、`q4_error_strata`、`q4_bootstrap_ci`、`q4_oof_repeated` |
+| `q4_evaluate.py` | 辅助：单次划分对照 + 各亚型（T13/T18/T21）单独建模 | `q4_singlesplit_*` |
+
+单次划分不足以排名：仅换随机种子，"all" 特征集的 OOF PR-AUC 就在 0.416~0.517 间摆动，而候选模型之间只差 ~0.005。
+论文正文指标一律取 `q4_validate.py` 的输出；`q4_evaluate.py` 的亚型模型可作补充。图（`q4_plot.py`）只读正式表，保证图表同源。
 - 主任务标签为 `label`，即 AB 列非空记为1；当前为66/554个异常事件。
 - 辅助任务分别使用 `label_T13`、`label_T18`、`label_T21`，当前事件级阳性数分别为22、45、13，允许同一事件多标签并存。
 - **禁止使用 AE 列 `fetal_health` 作为标签**；该列在女胎数据中全部为“是”。

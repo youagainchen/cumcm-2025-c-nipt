@@ -4,7 +4,15 @@
 The unit of analysis is one blood-draw event. Technical replicates with the
 same ``(mother_id, draw_idx)`` are aggregated before fitting. AB is the only
 source of the event label. This module deliberately returns probabilities;
-sample-out-of-subject threshold selection belongs to q4_evaluate.py.
+sample-out-of-subject threshold selection belongs to the evaluation layer.
+
+Evaluation layer (see docs/C题_问题四两人分工.md):
+  q4_validate.py   OFFICIAL. Repeated grouped CV (5 seeds x 5 folds), continuous
+                   rule scores, noise-aware model comparison, thresholds,
+                   sensitivity, error strata, cluster bootstrap.
+  q4_evaluate.py   Auxiliary single-split check plus per-subtype models; writes
+                   under the q4_singlesplit_ prefix so it cannot collide with
+                   the official outputs.
 """
 from __future__ import annotations
 
@@ -31,7 +39,6 @@ DATA_CANDIDATES = (
     ROOT / "data" / "female_clean.csv",
 )
 OUT = ROOT / "outputs"
-PROCESSED = ROOT / "data" / "processed"
 
 Z_FEATURES = ["z13", "z18", "z21", "zx"]
 QUALITY_FEATURES = [
@@ -316,7 +323,6 @@ def model_specs(models: dict[str, FittedQ4Model], events: pd.DataFrame) -> pd.Da
 def run(data_path: Path | None = None, output_dir: Path | None = None) -> dict:
     output_dir = Path(output_dir) if output_dir is not None else OUT
     output_dir.mkdir(parents=True, exist_ok=True)
-    PROCESSED.mkdir(parents=True, exist_ok=True)
     rows = load_rows(data_path)
     events = aggregate_events(rows)
     event_columns = ["event_id", "mother_id", "draw_idx", "sample_id", "week", "age", "height", "weight", "bmi",
@@ -324,7 +330,10 @@ def run(data_path: Path | None = None, output_dir: Path | None = None) -> dict:
                      "flag_gc", "flag_map_ratio", "flag_dup_ratio", "flag_filt_ratio", "flag_any"]
     event_columns += [column for column in ("aneuploidy_raw", "week_raw", "draw_date") if column in events]
     event_columns = list(dict.fromkeys(column for column in event_columns if column in events))
-    events[event_columns].to_csv(PROCESSED / "female_clean_event.csv", index=False, encoding="utf-8-sig")
+    # 注意：不要写 data/processed/female_clean_event.csv —— 那是 clean.py(丙) 的产物。
+    # 本脚本此前会用不同的列集合覆盖它，谁后跑谁生效，属于静默的数据源冲突。
+    # clean.py v3.2 起事件级文件已自带全部测量列，本表仅作对账副本另存到 outputs/。
+    events[event_columns].to_csv(output_dir / "q4_event_table.csv", index=False, encoding="utf-8-sig")
     audit_data(rows, events).to_csv(output_dir / "q4_data_audit.csv", index=False, encoding="utf-8-sig")
     group_difference(events).to_csv(output_dir / "q4_group_difference.csv", index=False, encoding="utf-8-sig")
     rule_baseline(events).to_csv(output_dir / "q4_rule_baseline.csv", index=False, encoding="utf-8-sig")

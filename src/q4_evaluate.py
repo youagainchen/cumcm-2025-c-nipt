@@ -1,5 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Grouped out-of-subject evaluation for Question 4."""
+"""Grouped out-of-subject evaluation for Question 4 (auxiliary).
+
+Status: AUXILIARY. The official paper-facing evaluation is q4_validate.py,
+which uses repeated grouped CV (5 seeds x 5 folds) instead of a single split.
+A single split is not usable for ranking here: swapping the seed alone moves
+the "all" feature set's OOF PR-AUC over 0.416-0.517, while the candidates
+differ by ~0.005. What this script still adds is per-subtype (T13/T18/T21)
+models, which q4_validate.py does not fit separately.
+
+All outputs therefore carry the q4_singlesplit_ prefix so they cannot
+overwrite the official tables (both scripts previously wrote
+q4_bootstrap_ci.csv with different column schemas).
+"""
 from __future__ import annotations
 
 import argparse
@@ -127,8 +139,8 @@ def run(data_path=None, output_dir=None, splits=5, bootstrap=500, seed=2026):
         part["probability"], part["threshold"], part["prediction"] = prediction.astype(float), 0.5, prediction.astype(int)
         rule_parts.append(part[["model", "target", "feature_set", "fold", "event_id", "mother_id", "label", "probability", "threshold", "prediction"]])
     all_oof = pd.concat([oof, *rule_parts], ignore_index=True)
-    all_oof.to_csv(output_dir / "q4_oof_predictions.csv", index=False, encoding="utf-8-sig"); thresholds.to_csv(output_dir / "q4_thresholds.csv", index=False, encoding="utf-8-sig")
-    metric_table(all_oof).to_csv(output_dir / "q4_cv_metrics.csv", index=False, encoding="utf-8-sig"); bootstrap_ci(oof, bootstrap, seed).to_csv(output_dir / "q4_bootstrap_ci.csv", index=False, encoding="utf-8-sig")
+    all_oof.to_csv(output_dir / "q4_singlesplit_oof_predictions.csv", index=False, encoding="utf-8-sig"); thresholds.to_csv(output_dir / "q4_singlesplit_thresholds.csv", index=False, encoding="utf-8-sig")
+    metric_table(all_oof).to_csv(output_dir / "q4_singlesplit_cv_metrics.csv", index=False, encoding="utf-8-sig"); bootstrap_ci(oof, bootstrap, seed).to_csv(output_dir / "q4_singlesplit_bootstrap_ci.csv", index=False, encoding="utf-8-sig")
     return {"event_count": len(events), "mother_count": events.mother_id.nunique(), "model_count": len(candidates), "splits": splits}
 
 

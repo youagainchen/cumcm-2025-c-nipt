@@ -74,7 +74,14 @@
 - **问题二预置（事件级，时间轴=孕周）**：`reached / first_pass_week / first_pass_visit / t_left / t_right / censored`
   默认=**均值口径(qual_mean)**；同名 `*_any` 列=任一重复口径做敏感性对照。默认用均值口径
   （any 口径对同一次抽血取最大、系统性更早，见报告 §五 A029/A066 差 2–3 周）。
-- 女胎事件字段：`label / label_T13 / label_T18 / label_T21`（组内任一异常）、`aneuploidy_raw`（合并）。
+- 女胎事件字段：`label / label_T13 / label_T18 / label_T21`（组内任一异常）、`aneuploidy_raw`（合并）、
+  `label_disagree`（技术重复间标签不一致，5 个事件；max 口径会掩盖这种分歧，做敏感性时可剔除）。
+- **v3.2 起两张事件文件都自带全部测量列**：`z13/z18/z21/zx`、`x_conc`、`gc/gc13/gc18/gc21`、
+  `reads_raw/uniq_reads/map_ratio/dup_ratio/filt_ratio`（男胎另有 `zy`），一次抽血内多次测序取**组内均值**；
+  同名 `*_sd` 列给出组内标准差（仅 `n_reps≥2` 时有值）= 该指标的技术误差量级。
+  另补 `event_id`（主键 `孕妇_draw抽血号`）、`sample_id/lmp/ivf/gravidity/parity/week_raw_s` 与
+  事件级 QC flag（`flag_gc/flag_map_ratio/flag_dup_ratio/flag_filt_ratio`）。
+  → 此前女胎事件文件只有标签与人口学列，问题四两人各自从行级重新聚合，存在口径漂移风险；现已可直接读事件文件。
 - `y_conc_sd` 仅在 `n_reps≥2` 时有值：事件内离散度 = 测量/技术误差量级（男胎中位约 0.0045，见报告 §八）。
 
 ### `docs/data_report.md`
