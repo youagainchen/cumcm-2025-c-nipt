@@ -97,7 +97,13 @@ def metrics(y, score, prediction) -> dict:
     f1 = (2 * ppv * sensitivity / denominator
           if np.isfinite(denominator) and denominator > 0 else np.nan)
     two_classes = len(np.unique(y)) == 2
+    # Brier 只对概率有意义。规则基线的分数是原始 Z（可为负、可远大于 1），
+    # 强行代入会得到一个没有解释的大数，故规则一行留空而不是填个假数。
+    is_probability = bool(np.all(np.isfinite(score)) and score.min() >= 0.0
+                          and score.max() <= 1.0)
+    brier = float(brier_score_loss(y, score)) if is_probability else np.nan
     return {"n": len(y), "positive": int(y.sum()), "tp": tp, "fp": fp, "tn": tn, "fn": fn,
+            "brier": brier,
             "sensitivity": sensitivity, "specificity": specificity, "ppv": ppv, "npv": npv,
             "f1": f1,
             "pr_auc": float(average_precision_score(y, score)) if two_classes else np.nan,
@@ -328,7 +334,8 @@ def subtype_repeated_cv(events: pd.DataFrame, overall_oof: pd.DataFrame,
                     roc_auc_mean=("roc_auc", "mean"), roc_auc_sd=("roc_auc", "std"),
                     sensitivity_mean=("sensitivity", "mean"),
                     specificity_mean=("specificity", "mean"),
-                    ppv_mean=("ppv", "mean"), repeats=("pr_auc", "size"))
+                    ppv_mean=("ppv", "mean"), npv_mean=("npv", "mean"),
+                    brier_mean=("brier", "mean"), repeats=("pr_auc", "size"))
                .reset_index())
     # 每个亚型内部：专用模型 vs 总体模型，差距是否超过划分噪声
     flags = []
@@ -356,7 +363,8 @@ def comparison(per_repeat: pd.DataFrame) -> pd.DataFrame:
                     roc_auc_mean=("roc_auc", "mean"), roc_auc_sd=("roc_auc", "std"),
                     sensitivity_mean=("sensitivity", "mean"),
                     specificity_mean=("specificity", "mean"),
-                    ppv_mean=("ppv", "mean"), f1_mean=("f1", "mean"),
+                    ppv_mean=("ppv", "mean"), npv_mean=("npv", "mean"),
+                    f1_mean=("f1", "mean"), brier_mean=("brier", "mean"),
                     repeats=("pr_auc", "size"))
                .reset_index().sort_values("pr_auc_mean", ascending=False))
     best = summary.iloc[0]
@@ -385,7 +393,7 @@ def cluster_bootstrap(oof: pd.DataFrame, n_boot: int, seed: int = BASE_SEED) -> 
         by_mother = {m: g for m, g in block.groupby("mother_id")}
         mothers = np.array(list(by_mother))
         draws = {k: [] for k in ("pr_auc", "roc_auc", "sensitivity",
-                                 "specificity", "ppv", "f1")}
+                                 "specificity", "ppv", "npv", "f1", "brier")}
         for _ in range(n_boot):
             picked = rng.choice(mothers, len(mothers), replace=True)
             sample = pd.concat([by_mother[m] for m in picked], ignore_index=True)
@@ -572,7 +580,8 @@ def main() -> None:
     summary.to_csv(args.output_dir / "q4_model_comparison.csv", index=False, encoding="utf-8-sig")
     print("\n【模型对比】跨重复均值 ± 标准差，按 PR-AUC 排序")
     display = summary[["model", "pr_auc_mean", "pr_auc_sd", "roc_auc_mean",
-                       "sensitivity_mean", "specificity_mean",
+                       "sensitivity_mean", "specificity_mean", "ppv_mean", "npv_mean",
+                       "f1_mean", "brier_mean",
                        "gap_vs_best", "noise_scale", "distinguishable_from_best"]]
     print(display.round(4).to_string(index=False))
     indistinguishable = summary[~summary.distinguishable_from_best].model.tolist()

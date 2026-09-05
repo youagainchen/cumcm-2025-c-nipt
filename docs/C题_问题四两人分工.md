@@ -143,19 +143,50 @@ T0                         T3                              T5-T7
 
 ---
 
-## 五、验收清单
+## 五、验收清单（2026-09-05 逐条核对，全部通过）
 
-- [ ] 标签仅来自AB，未使用AE或任何 `label*` 派生列作特征；
-- [ ] 正式数据单位为554个抽血事件，同次技术重复未当独立样本；
-- [ ] 所有划分均按147位孕妇分组，无孕妇跨训练/验证集；
-- [ ] 预处理、特征选择和阈值选择均在训练折内完成；
-- [ ] 未通过过采样或SMOTE改变天然类别比例；
-- [ ] 同时报告PR-AUC、灵敏度、特异度、PPV、NPV、F1、ROC-AUC、Brier和混淆矩阵；
-- [ ] 有规则基线，复杂模型的增益来自同折OOF比较；
-- [ ] T13/T18/T21分别评估，并说明阳性样本量很小；
-- [ ] 对QC、技术重复、特征集、类别权重和阈值做过稳健性分析；
-- [ ] 固定随机种子后一条命令能重现所有CSV与图表；
-- [ ] 结论明确限定为复现AB筛查结果，不冒充临床金标准诊断。
+| # | 项 | 状态 | 证据 |
+|---|---|---|---|
+| 1 | 标签仅来自AB，未用AE或 `label*` 派生列作特征 | ✅ | `FEATURE_SETS` 白名单内无标签派生列；`q4_zscore_check.csv` 另证 Z 与 AB 不对应 |
+| 2 | 正式单位为554个抽血事件，技术重复未当独立样本 | ✅ | 554 事件 / 147 孕妇；`row_level_wrong_unit` 作为反面对照单列在 `q4_sensitivity.csv` |
+| 3 | 所有划分按孕妇分组 | ✅ | `StratifiedGroupKFold(groups=mother_id)`，见 `folds_for()` |
+| 4 | 预处理/特征选择/阈值均在训练折内完成 | ✅ | Pipeline 在 `train` 上 fit；`choose_threshold` 只吃 `y[train_index], train_score` |
+| 5 | 未过采样或SMOTE | ✅ | 无重采样；`class_weight` 仅作候选并与未加权对照 |
+| 6 | 同时报 PR-AUC/灵敏度/特异度/PPV/NPV/F1/ROC-AUC/Brier/混淆矩阵 | ✅ | `q4_model_comparison.csv` 九项齐全；规则基线的 Brier 留空（其分数是原始 Z 不是概率） |
+| 7 | 有规则基线，复杂模型增益来自同折OOF比较 | ✅ | 规则用连续分数进同一套折；`distinguishable_from_best` 给出噪声判定 |
+| 8 | T13/T18/T21分别评估并说明阳性样本量小 | ✅ | `q4_subtype_comparison.csv`（22/45/13 个阳性事件，列在表内）+ `q4_error_strata.csv` |
+| 9 | 对QC/技术重复/特征集/类别权重/阈值做稳健性 | ✅ | `q4_sensitivity.csv` 七种情景 |
+| 10 | 固定种子后一条命令重现所有CSV与图 | ✅ | 见下方复现命令；种子 `BASE_SEED=2026` |
+| 11 | 结论限定为复现AB筛查，不冒充临床金标准 | ✅ | 各脚本文档字符串与图注均写明；PPV 仅 0.165 已如实披露 |
+
+### 复现命令（顺序执行）
+
+```bash
+python src/clean.py && python src/q4_model.py && python src/q4_signal_audit.py && python src/q4_validate.py && python src/q4_plot.py
+```
+
+### 最终结果（logit_z_quality，5 种子 × 5 折 OOF；括号为以孕妇为簇的 Bootstrap 95% 区间）
+
+| 指标 | 值 |
+|---|---|
+| PR-AUC | 0.484 ± 0.037（0.378–0.641） |
+| ROC-AUC | 0.778（0.722–0.856） |
+| 灵敏度 | 0.848（0.776–0.938） |
+| 特异度 | 0.417（0.344–0.444） |
+| PPV | 0.165（0.120–0.213） |
+| NPV | 0.953（0.929–0.980） |
+| Brier | 0.082（0.063–0.102） |
+| 混淆矩阵 | TP 56 / FP 284 / TN 204 / FN 10 |
+
+`logit_all` 与之在划分噪声内**不可区分**（差 0.0026 < 噪声 0.0469），论文应报"两者等价，取更简单的 z_quality"。
+受限随机森林 PR-AUC 0.318 显著更差，且 Brier 0.182 比"恒定预测基础发生率"（0.105）还糟——`class_weight="balanced"`
+把概率整体推高，校准崩坏，进一步说明本数据不该上非线性模型。
+
+### 仍需人工确认的一点
+
+分工 0.1 写"正式建模单位使用 `female_clean_event.csv`"，但 `q4_model.load_rows()` 实际读行级
+`female_clean.csv` 再自行聚合。两者数值已核对一致到 1e-16（clean.py v3.2 后），结果不受影响；
+若要严格对齐文档措辞，可把 `load_rows` 改为直接读事件文件。
 
 ## 六、最容易翻车的四点
 
