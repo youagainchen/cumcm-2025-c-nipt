@@ -159,7 +159,15 @@ T0                         T3                              T5-T7
 | 10 | 固定种子后一条命令重现所有CSV与图 | ✅ | 见下方复现命令；种子 `BASE_SEED=2026` |
 | 11 | 结论限定为复现AB筛查，不冒充临床金标准 | ✅ | 各脚本文档字符串与图注均写明；PPV 仅 0.165 已如实披露 |
 
-### 复现命令（顺序执行）
+### 复现命令（顺序执行，任一步失败即停）
+
+Windows PowerShell 5.1（队里默认环境，**不支持 `&&`**）：
+
+```powershell
+python src/clean.py; if($?){python src/q4_model.py}; if($?){python src/q4_signal_audit.py}; if($?){python src/q4_validate.py}; if($?){python src/q4_plot.py}
+```
+
+bash / PowerShell 7+：
 
 ```bash
 python src/clean.py && python src/q4_model.py && python src/q4_signal_audit.py && python src/q4_validate.py && python src/q4_plot.py
