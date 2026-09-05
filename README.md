@@ -76,10 +76,14 @@ paper/            论文与格式参考
 
 ## 问题四：女胎异常判定
 
-- 数据与模型：`python src/q4_model.py`，以554个抽血事件、147位孕妇为正式建模单位；AB非空为事件级异常标签（66/554），AE列不参与建模。
+- 数据与模型：`python src/q4_model.py`，直接读取 `data/processed/female_clean_event.csv`，以554个抽血事件、147位孕妇为正式建模单位；AB非空为事件级异常标签（66/554），AE列不参与建模。行级表仅用于审计和错误单位敏感性分析。
 - 信号审计：`python src/q4_signal_audit.py`，分别在事件级、孕妇级和孕妇内检查特征信号，并单列行级 Z 值与 AB 标签的一致性核查。
 - 样本外验证：`python src/q4_validate.py`，采用按孕妇分组的5种子×5折重复交叉验证；阈值只在训练折内按“灵敏度不低于90%时特异度最大”选择，亚型模型与总体模型共用折划分。
-- 主模型为L2正则化 Logistic（Z值+质量特征）。PR-AUC为0.484±0.037，ROC-AUC为0.778；多数票混淆矩阵为TP=56、FP=284、TN=204、FN=10。其与全特征Logistic的PR-AUC差0.0026，小于划分噪声0.0469，故选更简单模型。
+- 模型冻结：验证完成后运行 `python src/q4_freeze.py`，从验证生成的阈值表冻结最终模型；阈值表缺失或无有效主模型阈值时会直接报错。
+- 主模型为L2正则化 Logistic（Z值+质量特征）。PR-AUC为0.484±0.037，ROC-AUC为0.778；多数票混淆矩阵为TP=56、FP=284、TN=204、FN=10。其与全特征Logistic的PR-AUC差0.0066，小于划分噪声0.0469，故选更简单模型。
 - 结论边界：模型只复现本数据的AB判定，不能当作临床疾病诊断器；AB与常用Z值阈值明显脱节，且PPV仅0.165，外推必须谨慎。
 - 绘图：`python src/q4_plot.py`，输出6组正式图至`figures/q4_v1/`（300 dpi PNG+PDF）。
+- 隐私：`outputs/q4_final_predictions.csv` 及其他含 `mother_id` 的逐事件明细仅在本地生成，已从公开仓库跟踪范围排除。
 - 完整建模思路：[`docs/建模思路/问题四_建模思路.md`](docs/建模思路/问题四_建模思路.md)；两人非论文分工见[`docs/C题_问题四两人分工.md`](docs/C题_问题四两人分工.md)。
+
+完整复现顺序：`clean.py` → `q4_model.py` → `q4_signal_audit.py` → `q4_validate.py` → `q4_freeze.py` → `q4_plot.py`。

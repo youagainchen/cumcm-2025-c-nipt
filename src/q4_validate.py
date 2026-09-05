@@ -67,7 +67,7 @@ import pandas as pd
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 
-from q4_model import (FEATURE_SETS, SUBTYPES, aggregate_events, fit_model,
+from q4_model import (FEATURE_SETS, SUBTYPES, fit_model, load_events,
                       load_rows, predict_proba)
 
 warnings.filterwarnings("ignore")
@@ -465,6 +465,14 @@ def stratified_errors(errors: pd.DataFrame) -> pd.DataFrame:
     错误清单。
     """
     frame = errors.copy()
+    if "is_tech_repeat" not in frame.columns:
+        count_column = next((name for name in ("replicate_count", "n_reps")
+                             if name in frame.columns), None)
+        if count_column is None:
+            raise ValueError("error strata require is_tech_repeat, replicate_count, or n_reps")
+        frame["is_tech_repeat"] = (
+            pd.to_numeric(frame[count_column], errors="coerce").fillna(1) > 1
+        ).astype(int)
     layers = []
     for subtype in SUBTYPES:
         column = f"label_{subtype}"
@@ -481,9 +489,8 @@ def stratified_errors(errors: pd.DataFrame) -> pd.DataFrame:
     if "flag_any" in frame.columns:
         layers.append(("QC正常", frame.flag_any == 0))
         layers.append(("QC可疑", frame.flag_any == 1))
-    if "is_tech_repeat" in frame.columns:
-        layers.append(("含技术重复", frame.is_tech_repeat == 1))
-        layers.append(("无技术重复", frame.is_tech_repeat == 0))
+    layers.append(("含技术重复", frame.is_tech_repeat == 1))
+    layers.append(("无技术重复", frame.is_tech_repeat == 0))
     layers.append(("全体", pd.Series(True, index=frame.index)))
 
     records = []
@@ -595,7 +602,7 @@ def error_analysis(events: pd.DataFrame, oof: pd.DataFrame, model: str) -> pd.Da
          (voted.label == 1) & (voted.prediction == 1)],
         ["false_negative", "false_positive", "true_positive"], default="true_negative")
     context_columns = [c for c in ["week", "bmi", "age", "x_conc", "z13", "z18", "z21",
-                                   "flag_any", "is_tech_repeat", "label_T13",
+                                    "flag_any", "is_tech_repeat", "replicate_count", "n_reps", "label_T13",
                                    "label_T18", "label_T21", "draw_idx"]
                        if c in events.columns]
     context = events.reset_index(drop=True)[["mother_id"] + context_columns]
@@ -609,12 +616,16 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--splits", type=int, default=5)
     parser.add_argument("--n-boot", type=int, default=600)
+    parser.add_argument("--data", type=Path, default=None,
+                        help="official event-level female_clean_event.csv")
+    parser.add_argument("--row-data", type=Path, default=None,
+                        help="row-level female_clean.csv, used only for sensitivity analysis")
     parser.add_argument("--output-dir", type=Path, default=OUT)
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = load_rows()
-    events = aggregate_events(rows)
+    events = load_events(args.data)
+    rows = load_rows(args.row_data)
     print(f"事件级 {len(events)} 个抽血事件 / {events.mother_id.nunique()} 位孕妇；"
           f"阳性 {int(events.label.sum())}")
     print(f"重复分组交叉验证：{args.repeats} 个种子 x 最多 {args.splits} 折")

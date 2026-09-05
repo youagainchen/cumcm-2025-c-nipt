@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import mannwhitneyu
 
-from q4_model import FEATURE_SETS, SUBTYPES, aggregate_events, load_rows
+from q4_model import FEATURE_SETS, SUBTYPES, load_events, load_rows
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "outputs"
@@ -129,12 +129,16 @@ def zscore_check(rows: pd.DataFrame) -> pd.DataFrame:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="问题四信号来源审计（二号）")
+    parser.add_argument("--data", type=Path, default=None,
+                        help="official event-level female_clean_event.csv")
+    parser.add_argument("--row-data", type=Path, default=None,
+                        help="row-level female_clean.csv, used only for row-level audits")
     parser.add_argument("--output-dir", type=Path, default=OUT)
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = load_rows()
-    events = aggregate_events(rows)
+    events = load_events(args.data)
+    rows = load_rows(args.row_data)
     print(f"事件级 {len(events)} 个抽血事件 / {events.mother_id.nunique()} 位孕妇；"
           f"阳性 {int(events.label.sum())}")
 

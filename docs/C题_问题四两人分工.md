@@ -191,15 +191,15 @@ python src/clean.py && python src/q4_model.py && python src/q4_signal_audit.py &
 | Brier | 0.082（0.063–0.106） |
 | 混淆矩阵 | TP 56 / FP 284 / TN 204 / FN 10 |
 
-`logit_all` 与之在划分噪声内**不可区分**（差 0.0026 < 噪声 0.0469），论文应报"两者等价，取更简单的 z_quality"。
+`logit_all` 与之在划分噪声内**不可区分**（差 0.0066 < 噪声 0.0469），论文应报"两者等价，取更简单的 z_quality"。
 受限随机森林 PR-AUC 0.318 显著更差，且 Brier 0.182 比"恒定预测基础发生率"（0.105）还糟——`class_weight="balanced"`
 把概率整体推高，校准崩坏，进一步说明本数据不该上非线性模型。
 
 ### 事件表接口说明
 
-`q4_model.load_rows()` 先读取行级 `female_clean.csv`，随后由 `aggregate_events()` 在内存中按同一规则生成
-554行事件表；它与 `female_clean_event.csv` 已核对一致到 1e-16。保留这条路径是为了同时支持
-`row_level_wrong_unit` 反面对照，正式模型和全部主结果仍只使用事件表。
+正式模型、验证和冻结脚本均由 `q4_model.load_events()` 直接读取 `female_clean_event.csv`。
+`female_clean.csv` 只用于行级信号审计和 `row_level_wrong_unit` 反面对照；不再在模型脚本内二次聚合为正式事件表，
+避免年龄和身高校正口径因二次聚合而产生静默差异。
 
 ## 六、最容易翻车的四点
 

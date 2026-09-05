@@ -1,5 +1,5 @@
 {
-  "source": "data/processed/female_clean.csv",
+  "source": "data/processed/female_clean_event.csv",
   "row_count": 605,
   "event_count": 554,
   "mother_count": 147,
@@ -51,7 +51,7 @@
     "T18",
     "T21"
   ],
-  "label_definition": "event label = max(AB-derived row labels among technical replicates)",
+  "label_definition": "AB-derived event label supplied by female_clean_event.csv",
   "threshold_policy": "probability only; threshold is selected out of subject in q4_validate.py",
   "default_preview_model": "z_quality"
 }

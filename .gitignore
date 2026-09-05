@@ -38,6 +38,7 @@ outputs/q4_event_predictions.csv
 outputs/q4_oof_repeated.csv
 outputs/q4_subtype_oof.csv
 outputs/q4_errors.csv
+outputs/q4_final_predictions.csv
 figures/*
 !figures/.gitkeep
 !figures/q1_v4/

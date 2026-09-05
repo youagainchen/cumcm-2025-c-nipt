@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """Question 4: female-fetus abnormality classification.
 
-The unit of analysis is one blood-draw event. Technical replicates with the
-same ``(mother_id, draw_idx)`` are aggregated before fitting. AB is the only
-source of the event label. This module deliberately returns probabilities;
+The unit of analysis is one blood-draw event, loaded from the event table
+produced by ``clean.py``. The row-level table is used only for audits and the
+explicit wrong-unit sensitivity analysis. AB is the only source of the event
+label. This module deliberately returns probabilities;
 sample-out-of-subject threshold selection belongs to the evaluation layer.
 
 Evaluation layer: q4_validate.py is the single official pipeline (repeated
@@ -31,9 +32,13 @@ from sklearn.preprocessing import StandardScaler
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA_CANDIDATES = (
+ROW_DATA_CANDIDATES = (
     ROOT / "data" / "processed" / "female_clean.csv",
     ROOT / "data" / "female_clean.csv",
+)
+EVENT_DATA_CANDIDATES = (
+    ROOT / "data" / "processed" / "female_clean_event.csv",
+    ROOT / "data" / "female_clean_event.csv",
 )
 OUT = ROOT / "outputs"
 
@@ -52,13 +57,28 @@ SUBTYPES = ("T13", "T18", "T21")
 LABELS = ("label", "label_T13", "label_T18", "label_T21")
 
 
-def resolve_data_path(path: Path | None = None) -> Path:
+def _resolve_data_path(path: Path | None, candidates: tuple[Path, ...], name: str) -> Path:
     if path is not None:
-        return Path(path)
-    for candidate in DATA_CANDIDATES:
+        source = Path(path)
+        if not source.exists():
+            raise FileNotFoundError(f"{name} not found: {source}")
+        return source
+    for candidate in candidates:
         if candidate.exists():
             return candidate
-    raise FileNotFoundError("female_clean.csv not found under data/ or data/processed/")
+    raise FileNotFoundError(f"{name} not found under data/ or data/processed/; run python src/clean.py first")
+
+
+def resolve_row_data_path(path: Path | None = None) -> Path:
+    return _resolve_data_path(path, ROW_DATA_CANDIDATES, "female_clean.csv")
+
+
+def resolve_event_data_path(path: Path | None = None) -> Path:
+    return _resolve_data_path(path, EVENT_DATA_CANDIDATES, "female_clean_event.csv")
+
+
+# Backward-compatible name for callers that explicitly need the row table.
+resolve_data_path = resolve_row_data_path
 
 
 def _numeric(frame: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
@@ -70,7 +90,7 @@ def _numeric(frame: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
 
 
 def load_rows(path: Path | None = None) -> pd.DataFrame:
-    source = resolve_data_path(path)
+    source = resolve_row_data_path(path)
     frame = pd.read_csv(source, encoding="utf-8-sig")
     required = {"mother_id", "draw_idx", "sample_id", *LABELS, *Z_FEATURES}
     missing = sorted(required - set(frame.columns))
@@ -85,38 +105,32 @@ def load_rows(path: Path | None = None) -> pd.DataFrame:
     return frame
 
 
-def _first_nonempty(series: pd.Series):
-    values = series.dropna()
-    values = values[values.astype(str).str.strip() != ""]
-    return values.iloc[0] if not values.empty else np.nan
-
-
-def aggregate_events(rows: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate technical replicates and keep event-level AB labels."""
-    rows = rows.copy()
-    group_columns = ["mother_id", "draw_idx"]
-    groups = rows.groupby(group_columns, sort=False, dropna=False)
-    numeric_mean = ["age", "height", "weight", "bmi", "week", *FEATURE_SETS["z_quality"]]
-    numeric_mean = [column for column in dict.fromkeys(numeric_mean) if column in rows]
-    event = groups[numeric_mean].mean().reset_index()
-    first_columns = ["sample_id", "week_raw", "draw_date", "lmp", "ivf", "gravidity", "parity"]
-    for column in [column for column in first_columns if column in rows]:
-        event[column] = groups[column].agg(_first_nonempty).to_numpy()
-    for column in LABELS:
-        event[column] = groups[column].max().fillna(0).astype(int).to_numpy()
-    if "aneuploidy_raw" in rows:
-        event["aneuploidy_raw"] = groups["aneuploidy_raw"].agg(
-            lambda values: ";".join(dict.fromkeys(
-                str(value).strip() for value in values.dropna() if str(value).strip()
-            )) or np.nan
-        ).to_numpy()
-    for column in ["flag_gc", "flag_map_ratio", "flag_dup_ratio", "flag_filt_ratio", "flag_any"]:
-        if column in rows:
-            event[column] = groups[column].max().fillna(0).astype(int).to_numpy()
-    counts = groups.size().rename("replicate_count").reset_index()
-    event = event.merge(counts, on=group_columns, how="left", validate="one_to_one")
-    event["event_id"] = event["mother_id"].astype(str) + "_draw" + event["draw_idx"].astype(str)
-    return event.sort_values(["mother_id", "week", "draw_idx"], kind="stable").reset_index(drop=True)
+def load_events(path: Path | None = None) -> pd.DataFrame:
+    """Load and normalize the official event-level table from ``clean.py``."""
+    source = resolve_event_data_path(path)
+    frame = pd.read_csv(source, encoding="utf-8-sig")
+    if "week" not in frame.columns and "week_mean" in frame.columns:
+        frame["week"] = frame["week_mean"]
+    if "replicate_count" not in frame.columns and "n_reps" in frame.columns:
+        frame["replicate_count"] = frame["n_reps"]
+    if "is_tech_repeat" not in frame.columns and "replicate_count" in frame.columns:
+        frame["is_tech_repeat"] = (
+            pd.to_numeric(frame["replicate_count"], errors="coerce").fillna(1) > 1
+        ).astype(int)
+    required = {"event_id", "mother_id", "draw_idx", *LABELS, *Z_FEATURES,
+                "week", "replicate_count", "is_tech_repeat"}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"female event data is missing columns: {missing}")
+    numeric_columns = set(FEATURE_SETS["all"]) | set(LABELS) | {
+        "draw_idx", "replicate_count", "n_reps", "is_tech_repeat",
+        "flag_gc", "flag_map_ratio", "flag_dup_ratio", "flag_filt_ratio", "flag_any",
+    }
+    frame = _numeric(frame, numeric_columns)
+    frame["mother_id"] = frame["mother_id"].astype(str)
+    if frame["event_id"].duplicated().any() or frame[["mother_id", "draw_idx"]].duplicated().any():
+        raise ValueError("female event data must contain one row per (mother_id, draw_idx)")
+    return frame.sort_values(["mother_id", "week", "draw_idx"], kind="stable").reset_index(drop=True)
 
 
 def _audit_row(category: str, metric: str, value, detail: str = "") -> dict:
@@ -319,13 +333,14 @@ def model_specs(models: dict[str, FittedQ4Model], events: pd.DataFrame) -> pd.Da
     return pd.DataFrame(rows)
 
 
-def run(data_path: Path | None = None, output_dir: Path | None = None) -> dict:
+def run(data_path: Path | None = None, output_dir: Path | None = None,
+        row_data_path: Path | None = None) -> dict:
     output_dir = Path(output_dir) if output_dir is not None else OUT
     output_dir.mkdir(parents=True, exist_ok=True)
-    rows = load_rows(data_path)
-    events = aggregate_events(rows)
+    events = load_events(data_path)
+    rows = load_rows(row_data_path)
     event_columns = ["event_id", "mother_id", "draw_idx", "sample_id", "week", "age", "height", "weight", "bmi",
-                     *FEATURE_SETS["z_quality"], "replicate_count", *LABELS,
+                     *FEATURE_SETS["z_quality"], "n_reps", "replicate_count", "is_tech_repeat", *LABELS,
                      "flag_gc", "flag_map_ratio", "flag_dup_ratio", "flag_filt_ratio", "flag_any"]
     event_columns += [column for column in ("aneuploidy_raw", "week_raw", "draw_date") if column in events]
     event_columns = list(dict.fromkeys(column for column in event_columns if column in events))
@@ -348,7 +363,7 @@ def run(data_path: Path | None = None, output_dir: Path | None = None) -> dict:
     model_specs({**models, **{f"subtype_{key}": value for key, value in subtype_models.items()}}, events).to_csv(
         output_dir / "q4_model_candidates.csv", index=False, encoding="utf-8-sig"
     )
-    source_path = resolve_data_path(data_path)
+    source_path = resolve_event_data_path(data_path)
     try:
         source_display = source_path.relative_to(ROOT).as_posix()
     except ValueError:
@@ -356,7 +371,7 @@ def run(data_path: Path | None = None, output_dir: Path | None = None) -> dict:
     metadata = {"source": source_display, "row_count": int(len(rows)),
                 "event_count": int(len(events)), "mother_count": int(events["mother_id"].nunique()),
                 "feature_sets": FEATURE_SETS, "subtype_targets": list(SUBTYPES),
-                "label_definition": "event label = max(AB-derived row labels among technical replicates)",
+                "label_definition": "AB-derived event label supplied by female_clean_event.csv",
                 "threshold_policy": "probability only; threshold is selected out of subject in q4_validate.py",
                 "default_preview_model": "z_quality"}
     (output_dir / "q4_model_meta.json").write_text(json.dumps(metadata, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -367,11 +382,14 @@ def run(data_path: Path | None = None, output_dir: Path | None = None) -> dict:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build Question 4 female abnormality models")
-    parser.add_argument("--data", type=Path, default=None)
+    parser.add_argument("--data", type=Path, default=None,
+                        help="official event-level female_clean_event.csv")
+    parser.add_argument("--row-data", type=Path, default=None,
+                        help="row-level female_clean.csv, used only for audits")
     parser.add_argument("--output-dir", type=Path, default=None)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    print(json.dumps(run(args.data, args.output_dir), ensure_ascii=False, indent=2))
+    print(json.dumps(run(args.data, args.output_dir, args.row_data), ensure_ascii=False, indent=2))

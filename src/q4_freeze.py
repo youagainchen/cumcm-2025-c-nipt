@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from q4_model import aggregate_events, coefficients, fit_model, fit_subtype_models, load_rows, predict_proba, predict_subtypes
+from q4_model import coefficients, fit_model, fit_subtype_models, load_events, predict_proba, predict_subtypes
 
 
 FINAL_FEATURE_SET = "z_quality"
@@ -18,22 +18,33 @@ FINAL_MODEL_NAME = "logit_z_quality"
 FINAL_TARGET = "label"
 
 
-def validation_threshold(output_dir: Path, default: float = 0.0477749567973173) -> float:
+def validation_threshold(output_dir: Path) -> float:
     path = output_dir / "q4_threshold_policy.csv"
     if not path.exists():
-        return default
+        raise FileNotFoundError(
+            f"validation threshold table not found: {path}; run python src/q4_validate.py first"
+        )
     table = pd.read_csv(path, encoding="utf-8-sig")
-    values = pd.to_numeric(table.loc[table["model"] == FINAL_MODEL_NAME, "threshold"], errors="coerce").dropna()
-    return float(values.median()) if len(values) else default
+    required = {"model", "threshold"}
+    missing = sorted(required - set(table.columns))
+    if missing:
+        raise ValueError(f"invalid validation threshold table {path}: missing columns {missing}")
+    values = pd.to_numeric(
+        table.loc[table["model"] == FINAL_MODEL_NAME, "threshold"], errors="coerce"
+    ).dropna()
+    values = values[np.isfinite(values) & values.between(0.0, 1.0)]
+    if not len(values):
+        raise ValueError(f"no valid threshold for {FINAL_MODEL_NAME!r} in {path}")
+    return float(values.median())
 
 
 def run(data_path=None, output_dir=None):
     output_dir = Path(output_dir) if output_dir else Path(__file__).resolve().parents[1] / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
-    events = aggregate_events(load_rows(Path(data_path) if data_path else None))
+    threshold = validation_threshold(output_dir)
+    events = load_events(Path(data_path) if data_path else None)
     final_model = fit_model(events, feature_set=FINAL_FEATURE_SET, target=FINAL_TARGET)
     subtype_models = fit_subtype_models(events, feature_set=FINAL_FEATURE_SET)
-    threshold = validation_threshold(output_dir)
     probability = predict_proba(final_model, events)
     predictions = events[["event_id", "mother_id", "draw_idx", "label", "label_T13", "label_T18", "label_T21"]].copy()
     predictions["p_abnormal"] = probability
@@ -57,7 +68,8 @@ def run(data_path=None, output_dir=None):
         "target": FINAL_TARGET,
         "threshold": threshold,
         "threshold_policy": "median of repeated grouped-CV training-fold thresholds; sensitivity priority 90%",
-        "label_definition": "AB non-empty = abnormal, aggregated per blood-draw event",
+        "data_source": "data/processed/female_clean_event.csv" if data_path is None else str(data_path),
+        "label_definition": "AB non-empty = abnormal in the official blood-draw event table",
         "event_count": int(len(events)),
         "mother_count": int(events["mother_id"].nunique()),
         "validation_summary": validation_summary,
@@ -71,7 +83,8 @@ def run(data_path=None, output_dir=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Freeze the final Question 4 model")
-    parser.add_argument("--data", type=Path, default=None)
+    parser.add_argument("--data", type=Path, default=None,
+                        help="official event-level female_clean_event.csv")
     parser.add_argument("--output-dir", type=Path, default=None)
     args = parser.parse_args()
     run(args.data, args.output_dir)

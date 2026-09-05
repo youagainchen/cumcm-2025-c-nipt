@@ -2,9 +2,10 @@
   "model_name": "logit_z_quality",
   "feature_set": "z_quality",
   "target": "label",
-  "threshold": 0.0477749567973173,
+  "threshold": 0.0477749567973172,
   "threshold_policy": "median of repeated grouped-CV training-fold thresholds; sensitivity priority 90%",
-  "label_definition": "AB non-empty = abnormal, aggregated per blood-draw event",
+  "data_source": "data/processed/female_clean_event.csv",
+  "label_definition": "AB non-empty = abnormal in the official blood-draw event table",
   "event_count": 554,
   "mother_count": 147,
   "validation_summary": {
